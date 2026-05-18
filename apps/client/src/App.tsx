@@ -59,6 +59,8 @@ const minWheelInertiaDelta = 0.08;
 const startWheelInertiaDelta = 1.8;
 const urlReplaceDelay = 250;
 const overlayFaceSize = 1024;
+const farZoomOrthographicSize = 3.8;
+const closeZoomOrthographicSize = 1.25;
 
 type QuaternionState = {
   x: number;
@@ -346,7 +348,9 @@ export function App() {
     host.append(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 100);
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+    camera.position.set(0, 0, 4);
+    camera.lookAt(0, 0, 0);
     const geometry = new THREE.SphereGeometry(1, 96, 64);
     const fallbackTexture = createFallbackCubeTexture();
     const overlay = createOverlayCubeTexture();
@@ -359,8 +363,10 @@ export function App() {
       },
       vertexShader: `
         varying vec3 vLocalNormal;
+        varying vec3 vViewNormal;
         void main() {
           vLocalNormal = normalize(normal);
+          vViewNormal = normalize(normalMatrix * normal);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -369,13 +375,18 @@ export function App() {
         uniform samplerCube overlayMap;
         uniform samplerCube transientOverlayMap;
         varying vec3 vLocalNormal;
+        varying vec3 vViewNormal;
         void main() {
           vec3 localNormal = normalize(vLocalNormal);
+          vec3 viewNormal = normalize(vViewNormal);
           vec3 paint = textureCube(cubeMap, localNormal).rgb;
           vec4 overlay = textureCube(overlayMap, localNormal);
           vec4 transientOverlay = textureCube(transientOverlayMap, localNormal);
           vec3 committedPaint = mix(paint, overlay.rgb, overlay.a);
-          gl_FragColor = vec4(mix(committedPaint, transientOverlay.rgb, transientOverlay.a), 1.0);
+          vec3 spherePaint = mix(committedPaint, transientOverlay.rgb, transientOverlay.a);
+          float rim = 1.0 - smoothstep(0.0, 0.55, abs(viewNormal.z));
+          vec3 shadedPaint = mix(spherePaint, vec3(0.62), rim * 0.32);
+          gl_FragColor = vec4(shadedPaint, 1.0);
         }
       `,
     });
@@ -789,8 +800,7 @@ export function App() {
     const onResize = () => {
       const width = host.clientWidth;
       const height = host.clientHeight;
-      camera.aspect = width / Math.max(height, 1);
-      camera.updateProjectionMatrix();
+      updateOrthographicCamera(camera, width, height, viewStateRef.current.zoom);
       renderer.setSize(width, height);
     };
 
@@ -943,9 +953,12 @@ export function App() {
         inertiaVelocity.speed *= inertiaDamping;
       }
 
-      const zoomDistance = 4.2 - viewStateRef.current.zoom * 2.35;
-      camera.position.set(0, 0, zoomDistance);
-      camera.lookAt(0, 0, 0);
+      updateOrthographicCamera(
+        camera,
+        host.clientWidth,
+        host.clientHeight,
+        viewStateRef.current.zoom,
+      );
       sphere.quaternion.copy(
         quaternionStateToThree(viewStateRef.current.orientation),
       );
@@ -959,6 +972,7 @@ export function App() {
     renderer.domElement.addEventListener("pointercancel", onPointerUp);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("resize", onResize);
+    window.visualViewport?.addEventListener("resize", onResize);
     onResize();
     animate();
 
@@ -966,6 +980,7 @@ export function App() {
       flushUrl();
       window.cancelAnimationFrame(frameId);
       window.removeEventListener("resize", onResize);
+      window.visualViewport?.removeEventListener("resize", onResize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
@@ -1000,9 +1015,9 @@ export function App() {
   };
 
   return (
-    <main className="relative min-h-screen w-screen overflow-hidden">
+    <main className="relative h-dvh min-h-dvh w-screen overflow-hidden">
       <section
-        className="fixed inset-0 grid min-h-screen min-w-0 place-items-center bg-neutral-800"
+        className="fixed inset-0 grid h-dvh min-h-dvh min-w-0 place-items-center bg-neutral-800"
         aria-label="Shared drawing sphere"
       >
         <div
@@ -1070,37 +1085,39 @@ export function App() {
 
         <div className={`grow`}></div>
 
-        <button
-          type="button"
-          className={`${buttonClass} w-12 h-12 grid place-items-center`}
-          onClick={() =>
-            updateViewFromControls((current) => ({
-              ...current,
-              autoRotateEnabled: !current.autoRotateEnabled,
-            }))
-          }
-        >
-          {viewState.autoRotateEnabled ? (
-            <PauseIcon
-              className={iconClass}
-              fill="currentColor"
-              aria-hidden="true"
-            />
-          ) : (
-            <PlayIcon
-              className={iconClass}
-              fill="currentColor"
-              aria-hidden="true"
-            />
-          )}
-          <div className="hidden">
-            {viewState.autoRotateEnabled
-              ? autoRotateActive
-                ? "Auto-rotate on"
-                : "Auto suspended"
-              : "Auto-rotate off"}
-          </div>
-        </button>
+        {!drawingMode ? (
+          <button
+            type="button"
+            className={`${buttonClass} w-12 h-12 grid place-items-center`}
+            onClick={() =>
+              updateViewFromControls((current) => ({
+                ...current,
+                autoRotateEnabled: !current.autoRotateEnabled,
+              }))
+            }
+          >
+            {viewState.autoRotateEnabled ? (
+              <PauseIcon
+                className={iconClass}
+                fill="currentColor"
+                aria-hidden="true"
+              />
+            ) : (
+              <PlayIcon
+                className={iconClass}
+                fill="currentColor"
+                aria-hidden="true"
+              />
+            )}
+            <div className="hidden">
+              {viewState.autoRotateEnabled
+                ? autoRotateActive
+                  ? "Auto-rotate on"
+                  : "Auto suspended"
+                : "Auto-rotate off"}
+            </div>
+          </button>
+        ) : null}
 
         <div className={`${panelClass} h-12 w-24 relative flex rounded-full`}>
           <div
@@ -1181,7 +1198,10 @@ export function App() {
       >
         {drawingMode ? (
           <>
-            <div className={`flex`} aria-label="Drawing palette">
+            <div
+              className="grid grid-cols-10 max-[640px]:grid-cols-5"
+              aria-label="Drawing palette"
+            >
               {drawingPalette.map((color) => (
                 <button
                   key={color}
@@ -1197,12 +1217,12 @@ export function App() {
               ))}
             </div>
 
-            <div className="flex">
+            <div className="flex max-[640px]:flex-col">
               {brushSizes.map((brushSize) => (
                 <button
                   key={brushSize}
                   type="button"
-                  className={`cursor-pointer bg-neutral-400 pointer-events-auto w-12 place-items-center h-12 ${selectedBrushSize === brushSize ? "rounded-full" : ""}`}
+                  className={`cursor-pointer bg-neutral-400 pointer-events-auto w-12 grid place-items-center h-12 ${selectedBrushSize === brushSize ? "rounded-full" : ""}`}
                   disabled={connectionState !== "connected"}
                   aria-label={`${brushSize} brush`}
                   onClick={() => setSelectedBrushSize(brushSize)}
@@ -1547,10 +1567,28 @@ function brushPixelWidth(brushSize: BrushSize) {
   return Math.max(2, brushAngularWidths[brushSize] * overlayFaceSize * 2.5);
 }
 
+function updateOrthographicCamera(
+  camera: THREE.OrthographicCamera,
+  width: number,
+  height: number,
+  zoom: number,
+) {
+  const aspect = width / Math.max(height, 1);
+  const viewSize =
+    farZoomOrthographicSize -
+    clampZoom(zoom) * (farZoomOrthographicSize - closeZoomOrthographicSize);
+
+  camera.left = (-viewSize * aspect) / 2;
+  camera.right = (viewSize * aspect) / 2;
+  camera.top = viewSize / 2;
+  camera.bottom = -viewSize / 2;
+  camera.updateProjectionMatrix();
+}
+
 function spherePointFromPointer(
   event: PointerEvent,
   renderer: THREE.WebGLRenderer,
-  camera: THREE.PerspectiveCamera,
+  camera: THREE.Camera,
   sphere: THREE.Mesh,
   raycaster: THREE.Raycaster,
   pointerNdc: THREE.Vector2,
@@ -1575,7 +1613,7 @@ function spherePointFromPointer(
 function spherePointFromClientPoint(
   point: { x: number; y: number },
   renderer: THREE.WebGLRenderer,
-  camera: THREE.PerspectiveCamera,
+  camera: THREE.Camera,
   sphere: THREE.Mesh,
   raycaster: THREE.Raycaster,
   pointerNdc: THREE.Vector2,

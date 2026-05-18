@@ -16,8 +16,8 @@ export const drawingPalette = [
 export const brushSizes = ["fine", "bold"] as const;
 
 export const brushAngularWidths = {
-  fine: 0.006,
-  bold: 0.014
+  fine: 0.001171875,
+  bold: 0.0046875
 } as const satisfies Record<(typeof brushSizes)[number], number>;
 
 export const pointSamplingDistanceRatio = 0.3;
@@ -27,7 +27,7 @@ export const viewSettings = {
   drawingZoomThreshold: 0.65,
   comfortableDrawingZoom: 0.8,
   minZoom: 0,
-  maxZoom: 1
+  maxZoom: 1.25
 } as const;
 
 export const visitTimeoutSeconds = 120;
