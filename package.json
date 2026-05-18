@@ -1,0 +1,30 @@
+{
+  "name": "globe2",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @globe2/shared && npm run build -w @globe2/client && npm run build -w @globe2/server",
+    "check": "npm run build -w @globe2/shared && npm run check -w @globe2/client && npm run check -w @globe2/server && npm run check -w @globe2/shared",
+    "dev": "concurrently -k -n api,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "npm run dev -w @globe2/client",
+    "dev:server": "node --env-file=.env ./node_modules/.bin/tsx watch apps/server/src/server.ts",
+    "dev:worker": "npm run dev:worker -w @globe2/server",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate --config apps/server/drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config apps/server/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.2.1",
+    "drizzle-kit": "^0.31.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.3"
+  }
+}
