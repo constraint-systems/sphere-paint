@@ -486,6 +486,7 @@ export function App() {
       | undefined;
     const touches = new Map<number, { x: number; y: number }>();
     let lastPinchDistance: number | undefined;
+    let lastTwoFingerAngle: number | undefined;
     let pendingMultiTouchRotation = false;
     let pendingStrokeUpdate:
       | { strokeId: string; points: UnitVector[]; timeout: number | undefined }
@@ -547,6 +548,34 @@ export function App() {
       if (elapsedMs > 0) {
         const axisAngle = quaternionToAxisAngle(delta);
         releaseVelocity.axis.copy(axisAngle.axis);
+        releaseVelocity.speed = axisAngle.angle / elapsedMs;
+      }
+    };
+
+    const rollByTouchAngle = (angleDelta: number, elapsedMs: number) => {
+      if (Math.abs(angleDelta) < 0.000001) {
+        return;
+      }
+
+      const rollDelta = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1),
+        -angleDelta,
+      );
+      const orientation = rollDelta
+        .clone()
+        .multiply(quaternionStateToThree(viewStateRef.current.orientation))
+        .normalize();
+      updateView({
+        ...viewStateRef.current,
+        orientation: quaternionToState(orientation),
+      });
+
+      if (elapsedMs > 0) {
+        const axisAngle = quaternionToAxisAngle(rollDelta);
+        const invOrientation = quaternionStateToThree(
+          viewStateRef.current.orientation,
+        ).invert();
+        releaseVelocity.axis.copy(axisAngle.axis).applyQuaternion(invOrientation);
         releaseVelocity.speed = axisAngle.angle / elapsedMs;
       }
     };
@@ -741,6 +770,8 @@ export function App() {
       pointer.lastAt = performance.now();
       lastPinchDistance =
         touches.size >= 2 ? pinchDistance(touches) : undefined;
+      lastTwoFingerAngle =
+        touches.size >= 2 ? twoFingerAngle(touches) : undefined;
       stopInertia(inertiaVelocity, releaseVelocity);
     };
 
@@ -811,6 +842,8 @@ export function App() {
       touches.delete(event.pointerId);
       lastPinchDistance =
         touches.size >= 2 ? pinchDistance(touches) : undefined;
+      lastTwoFingerAngle =
+        touches.size >= 2 ? twoFingerAngle(touches) : undefined;
 
       if (
         pointer.id === event.pointerId ||
@@ -857,6 +890,7 @@ export function App() {
         pointer.multiTouch = false;
         pointer.anchorPoint = undefined;
         pendingMultiTouchRotation = false;
+        lastTwoFingerAngle = undefined;
 
         if (wasRotating && releaseVelocity.speed >= startInertiaVelocity) {
           inertiaVelocity.axis.copy(releaseVelocity.axis);
@@ -957,6 +991,14 @@ export function App() {
           );
         }
 
+        const currentTwoFingerAngle = twoFingerAngle(touches);
+        if (lastTwoFingerAngle !== undefined) {
+          rollByTouchAngle(
+            normalizeAngleDelta(currentTwoFingerAngle - lastTwoFingerAngle),
+            now - pointer.lastAt,
+          );
+        }
+        lastTwoFingerAngle = currentTwoFingerAngle;
         pointer.lastAt = now;
         pendingMultiTouchRotation = false;
       }
@@ -1730,6 +1772,18 @@ function midpoint(touches: Map<number, { x: number; y: number }>) {
 function pinchDistance(touches: Map<number, { x: number; y: number }>) {
   const [a, b] = Array.from(touches.values());
   return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+}
+
+function twoFingerAngle(touches: Map<number, { x: number; y: number }>) {
+  const [a, b] = Array.from(touches.values());
+  return a && b ? Math.atan2(b.y - a.y, b.x - a.x) : 0;
+}
+
+function normalizeAngleDelta(delta: number) {
+  let normalized = delta;
+  while (normalized > Math.PI) normalized -= Math.PI * 2;
+  while (normalized < -Math.PI) normalized += Math.PI * 2;
+  return normalized;
 }
 
 function createFallbackCubeTexture() {
