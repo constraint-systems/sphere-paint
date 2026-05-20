@@ -1,9 +1,10 @@
 module.exports = {
   apps: [
     {
-      name: "globe2-api",
-      script: "apps/server/dist/src/server.js",
-      cwd: "/var/www/globe2/current",
+      name: "sphere-paint-api",
+      script: "node_modules/.bin/tsx",
+      args: "apps/server/src/server.ts",
+      cwd: __dirname,
       interpreter: "node",
       node_args: "--env-file=.env",
       env: {
@@ -11,9 +12,10 @@ module.exports = {
       },
     },
     {
-      name: "globe2-worker",
-      script: "apps/server/dist/src/worker.js",
-      cwd: "/var/www/globe2/current",
+      name: "sphere-paint-worker",
+      script: "node_modules/.bin/tsx",
+      args: "apps/server/src/worker.ts",
+      cwd: __dirname,
       interpreter: "node",
       node_args: "--env-file=.env",
       env: {

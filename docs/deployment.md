@@ -4,8 +4,8 @@
 
 `globe2` deploys directly to a Linux VPS. Nginx serves the built client, terminates TLS, and proxies `/api` plus `/api/ws` to the Fastify server. PM2 runs two Node processes:
 
-- `globe2-api`
-- `globe2-worker`
+- `sphere-paint-api`
+- `sphere-paint-worker`
 
 ## Required Environment
 
@@ -43,7 +43,7 @@ npm run db:migrate
 
 ## PM2
 
-The PM2 config assumes the release lives at `/var/www/globe2/current`.
+The PM2 config uses the directory containing `ecosystem.config.cjs` as its working directory.
 
 ```sh
 pm2 start ecosystem.config.cjs
