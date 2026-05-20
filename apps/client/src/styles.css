@@ -19,5 +19,17 @@
   body {
     margin: 0;
     overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable="true"] {
+    -webkit-touch-callout: default;
+    user-select: text;
+    -webkit-user-select: text;
   }
 }
