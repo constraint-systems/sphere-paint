@@ -145,7 +145,7 @@ Server to client:
 
 Snapshot promotion emits one `snapshot_promoted` event containing the new Snapshot version/background face URLs and a cutoff revision or baked Drawing id range/list. Clients swap the baked background and rebuild the unbaked overlay.
 
-Admin reset emits a `world_reset` event when it affects connected clients.
+Admin force-snapshot can promote a new Snapshot for operational recovery or migration.
 
 `drawing_committed` includes the full committed Drawing. `snapshot_promoted` does not include the full remaining unbaked Drawing list during normal live delivery.
 
@@ -261,8 +261,7 @@ Expected configuration surface:
 - `DATABASE_URL`.
 - Public app origin / allowed origins.
 - Server host and port.
-- Snapshot store mode.
-- Local Snapshot directory.
+- Snapshot store mode, fixed to S3 for deployment.
 - AWS region, S3 bucket, and credentials.
 - PM2 process names.
 - Rate limit settings.
@@ -361,12 +360,12 @@ Acceptance checks:
 
 ### 8. Operations and deployment
 
-Add operational reset/force-snapshot tooling, PM2 ecosystem config, Nginx template, deployment notes, production environment documentation, rate limits, payload caps, and origin validation.
+Add operational force-snapshot tooling, PM2 ecosystem config, Nginx template, deployment notes, production environment documentation, rate limits, payload caps, and origin validation.
 
 Acceptance checks:
 
 - The VPS can run separate PM2 processes for server and Snapshot worker.
 - Nginx serves the built React app and proxies API/WebSocket routes.
 - Railway Postgres and AWS S3 config are documented.
-- Admin reset emits `world_reset` for connected clients.
+- Admin force-snapshot can promote a new Snapshot and return its revision.
 - Required environment/config keys are listed and validated at startup.

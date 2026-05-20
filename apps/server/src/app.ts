@@ -4,6 +4,8 @@ import { clientMessageSchema, type ServerEvent } from "@globe2/shared";
 import Fastify from "fastify";
 import type { AppConfig } from "./config";
 import { createDb } from "./db/client";
+import { createSnapshotStore } from "./snapshot-store";
+import { SnapshotWorker } from "./snapshot-worker";
 import { defaultWorld, WorldService } from "./world-service";
 
 export function createApp(config: AppConfig) {
@@ -55,8 +57,14 @@ export function createApp(config: AppConfig) {
       .send(initialSnapshotFaceSvg());
   });
 
+  type RunCheck = (options?: {
+    forceRun?: boolean;
+  }) => Promise<Extract<ServerEvent, { type: "snapshot_promoted" }> | null>;
+  let workerRunCheck: RunCheck | undefined;
+
   app.addHook("onReady", async () => {
     await worldService.ensureDefaultWorld();
+    workerRunCheck = createSnapshotRunner();
   });
 
   app.addHook("onClose", async () => {
@@ -219,6 +227,60 @@ export function createApp(config: AppConfig) {
       });
     });
   });
+
+  function createSnapshotRunner(): RunCheck {
+    const store = createSnapshotStore(config);
+    const worker = new SnapshotWorker(worldService, config, store);
+    let running = false;
+
+    const runCheck: RunCheck = async (options) => {
+      if (running) return null;
+      running = true;
+      try {
+        const event = await worker.runCheck(options);
+        if (event) {
+          app.log.info({ snapshotId: event.snapshotId, revision: event.revision }, "snapshot promoted");
+          broadcast(event);
+        }
+        return event;
+      } finally {
+        running = false;
+      }
+    };
+
+    return runCheck;
+  }
+
+  app.post<{ Headers: { authorization?: string } }>(
+    "/api/admin/force-snapshot",
+    async (request, reply) => {
+      const secret = config.ADMIN_SECRET;
+      if (!secret) {
+        return reply.code(404).send();
+      }
+      if (request.headers.authorization !== `Bearer ${secret}`) {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      if (!workerRunCheck) {
+        return reply.code(503).send({ error: "Worker not ready" });
+      }
+      try {
+        const event = await workerRunCheck({ forceRun: true });
+        if (!event) {
+          return reply.code(200).send({ promoted: false, reason: "No eligible drawings or worker busy" });
+        }
+        return reply.code(200).send({
+          promoted: true,
+          snapshotId: event.snapshotId,
+          revision: event.revision,
+          bakedCount: event.bakedDrawingIds?.length ?? 0,
+        });
+      } catch (error: unknown) {
+        app.log.error(error, "force-snapshot error");
+        return reply.code(500).send({ error: String(error) });
+      }
+    },
+  );
 
   return app;
 }

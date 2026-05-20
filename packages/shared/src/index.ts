@@ -24,8 +24,8 @@ export const pointSamplingDistanceRatio = 0.3;
 
 export const viewSettings = {
   initialZoom: 0,
-  drawingZoomThreshold: 0.65,
-  comfortableDrawingZoom: 0.8,
+  drawingZoomThreshold: 1,
+  comfortableDrawingZoom: 1.2,
   minZoom: 0,
   maxZoom: 1.25
 } as const;

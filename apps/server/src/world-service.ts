@@ -5,6 +5,7 @@ import {
   drawingSchema,
   isApproximatelyUnitVector,
   snapshotFacesSchema,
+  snapshotStabilizationDelaySeconds,
   viewSettings,
   type BrushSize,
   type Drawing,
@@ -12,7 +13,7 @@ import {
   type SnapshotFaces,
   type ServerEvent
 } from "@globe2/shared";
-import { and, asc, eq, gt, isNull, min, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNull, lte, min, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { AppConfig } from "./config";
 import {
@@ -272,6 +273,155 @@ export class WorldService {
     });
   }
 
+  async checkSnapshotEligibility(
+    worldId: string,
+    now: Date,
+  ): Promise<{ count: number; oldestEligibleAgeSeconds: number | null }> {
+    const cutoffDate = new Date(now.getTime() - snapshotStabilizationDelaySeconds * 1000);
+    const [result] = await this.db
+      .select({
+        count: count(drawings.id),
+        oldestAt: min(drawings.createdAt),
+      })
+      .from(drawings)
+      .where(
+        and(
+          eq(drawings.worldId, worldId),
+          eq(drawings.status, "active"),
+          isNull(drawings.snapshotId),
+          lte(drawings.createdAt, cutoffDate),
+        ),
+      );
+
+    const total = result?.count ?? 0;
+    const oldestAt = result?.oldestAt ?? null;
+    const oldestEligibleAgeSeconds =
+      oldestAt ? (now.getTime() - oldestAt.getTime()) / 1000 : null;
+
+    return { count: total, oldestEligibleAgeSeconds };
+  }
+
+  async getEligibleDrawings(
+    worldId: string,
+    cutoffRevision: number,
+    now: Date,
+    skipStabilization = false,
+  ): Promise<Drawing[]> {
+    const cutoffDate = skipStabilization
+      ? now
+      : new Date(now.getTime() - snapshotStabilizationDelaySeconds * 1000);
+    const rows = await this.db
+      .select()
+      .from(drawings)
+      .where(
+        and(
+          eq(drawings.worldId, worldId),
+          eq(drawings.status, "active"),
+          isNull(drawings.snapshotId),
+          lte(drawings.createdRevision, cutoffRevision),
+          lte(drawings.createdAt, cutoffDate),
+        ),
+      )
+      .orderBy(asc(drawings.createdRevision));
+
+    return rows.map((row) =>
+      drawingSchema.parse({
+        id: row.id,
+        worldId: row.worldId,
+        visitId: row.visitId,
+        path: row.path,
+        color: normalizeDrawingColor(row.color),
+        brushSize: row.brushSize,
+        createdRevision: row.createdRevision,
+        createdAt: row.createdAt.toISOString(),
+      }),
+    );
+  }
+
+  async getCurrentSnapshot(worldId: string): Promise<{
+    id: string;
+    faceUrls: SnapshotFaces;
+    promotedRevision: number;
+  }> {
+    const [world] = await this.db
+      .select()
+      .from(worlds)
+      .where(eq(worlds.id, worldId))
+      .limit(1);
+    const snapshotId = world?.currentSnapshotId ?? initialSnapshotId;
+    const [snapshot] = await this.db
+      .select()
+      .from(snapshots)
+      .where(eq(snapshots.id, snapshotId))
+      .limit(1);
+
+    if (!snapshot) throw new Error("Current snapshot not found");
+
+    return {
+      id: snapshot.id,
+      faceUrls: snapshotFacesSchema.parse(snapshot.faceUrls),
+      promotedRevision: snapshot.promotedRevision ?? 0,
+    };
+  }
+
+  async promoteSnapshot(input: {
+    worldId: string;
+    newSnapshotId: string;
+    faceUrls: SnapshotFaces;
+    sourceFromRevision: number;
+    sourceToRevision: number;
+    bakedDrawingIds: string[];
+  }): Promise<Extract<ServerEvent, { type: "snapshot_promoted" }>> {
+    return this.db.transaction(async (tx) => {
+      const [updatedWorld] = await tx
+        .update(worlds)
+        .set({
+          currentSnapshotId: input.newSnapshotId,
+          currentRevision: sql`${worlds.currentRevision} + 1`,
+        })
+        .where(eq(worlds.id, input.worldId))
+        .returning({ revision: worlds.currentRevision });
+
+      if (!updatedWorld) throw new Error("World revision was not updated");
+
+      await tx.insert(snapshots).values({
+        id: input.newSnapshotId,
+        worldId: input.worldId,
+        status: "promoted",
+        faceUrls: input.faceUrls,
+        sourceFromRevision: input.sourceFromRevision,
+        sourceToRevision: input.sourceToRevision,
+        promotedRevision: updatedWorld.revision,
+        promotedAt: new Date(),
+      });
+
+      if (input.bakedDrawingIds.length > 0) {
+        await tx
+          .update(drawings)
+          .set({ status: "baked", snapshotId: input.newSnapshotId })
+          .where(inArray(drawings.id, input.bakedDrawingIds));
+      }
+
+      const event = {
+        type: "snapshot_promoted",
+        revision: updatedWorld.revision,
+        snapshotId: input.newSnapshotId,
+        faces: input.faceUrls,
+        bakedDrawingIds: input.bakedDrawingIds,
+        cutoffRevision: input.sourceToRevision,
+      } satisfies Extract<ServerEvent, { type: "snapshot_promoted" }>;
+
+      await tx.insert(worldEvents).values({
+        revision: updatedWorld.revision,
+        worldId: input.worldId,
+        type: event.type,
+        payload: event,
+      });
+
+      return event;
+    });
+  }
+
   async commitDrawing(input: {
     worldId?: string;
     visitId: string;
@@ -288,12 +438,15 @@ export class WorldService {
 
     return this.db.transaction(async (tx) => {
       const [visit] = await tx
-        .select()
-        .from(visits)
+        .update(visits)
+        .set({
+          lastSeenAt: new Date(),
+          expiresAt: nowPlusVisitTimeout(this.config.VISIT_TIMEOUT_SECONDS)
+        })
         .where(and(eq(visits.id, input.visitId), eq(visits.worldId, worldId), eq(visits.status, "active")))
-        .limit(1);
+        .returning();
 
-      if (!visit || visit.expiresAt.getTime() <= Date.now()) {
+      if (!visit) {
         throw new Error("Invalid visit");
       }
 

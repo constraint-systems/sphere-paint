@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="sphere-light" cx="34%" cy="28%" r="68%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="48%" stop-color="#f8fafc"/>
+      <stop offset="78%" stop-color="#d4d4d4"/>
+      <stop offset="100%" stop-color="#8b8b8b"/>
+    </radialGradient>
+    <radialGradient id="rim-shadow" cx="50%" cy="50%" r="50%">
+      <stop offset="72%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.34"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="29" fill="url(#sphere-light)"/>
+  <circle cx="32" cy="32" r="29" fill="url(#rim-shadow)"/>
+  <ellipse cx="25" cy="21" rx="10" ry="7" fill="#ffffff" opacity="0.72"/>
+</svg>

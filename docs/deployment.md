@@ -1,0 +1,82 @@
+# Deployment
+
+## Target
+
+`globe2` deploys directly to a Linux VPS. Nginx serves the built client, terminates TLS, and proxies `/api` plus `/api/ws` to the Fastify server. PM2 runs two Node processes:
+
+- `globe2-api`
+- `globe2-worker`
+
+## Required Environment
+
+Create `/var/www/globe2/current/.env` on the VPS:
+
+```env
+DATABASE_URL=postgres://...
+APP_ORIGIN=https://your-domain.com
+SERVER_HOST=127.0.0.1
+SERVER_PORT=47291
+SNAPSHOT_STORE_MODE=s3
+AWS_REGION=your-bucket-region
+AWS_S3_BUCKET=your-snapshot-bucket
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+VISIT_TIMEOUT_SECONDS=120
+SNAPSHOT_CHECK_INTERVAL_SECONDS=60
+SNAPSHOT_MIN_ELIGIBLE_DRAWINGS=500
+SNAPSHOT_AGE_HOURS=24
+SNAPSHOT_MIN_AGED_DRAWINGS=50
+ADMIN_SECRET=...
+```
+
+Set the S3 bucket CORS allowed origins to include `APP_ORIGIN`.
+
+## Build
+
+From the release directory:
+
+```sh
+npm ci
+npm run build
+npm run db:migrate
+```
+
+## PM2
+
+The PM2 config assumes the release lives at `/var/www/globe2/current`.
+
+```sh
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 status
+```
+
+For updates:
+
+```sh
+npm ci
+npm run build
+npm run db:migrate
+pm2 reload ecosystem.config.cjs --update-env
+```
+
+## Nginx
+
+Copy `docs/nginx/globe2.conf` to `/etc/nginx/sites-available/globe2`, replace `example.com`, then enable it:
+
+```sh
+sudo ln -s /etc/nginx/sites-available/globe2 /etc/nginx/sites-enabled/globe2
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Use Certbot or your normal TLS automation to add HTTPS.
+
+## Smoke Checks
+
+```sh
+curl -fsS https://your-domain.com/api/health
+curl -fsS -X POST -H "Authorization: Bearer $ADMIN_SECRET" https://your-domain.com/api/admin/force-snapshot
+```
+
+Then load the site and confirm `/api/bootstrap` returns S3 `snapshot.faces.*.url` values.

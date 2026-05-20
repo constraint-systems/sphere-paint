@@ -1,0 +1,24 @@
+{
+  "name": "Sphere Paint",
+  "short_name": "Sphere Paint",
+  "description": "Collaboratively paint a sphere. Zoom in to draw and zoom out to get a global view. All marks are public and permanent (until they're drawn over).",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171717",
+  "theme_color": "#171717",
+  "icons": [
+    {
+      "src": "/sphere-paint-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/sphere-paint-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

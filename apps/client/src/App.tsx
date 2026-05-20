@@ -19,8 +19,9 @@ import {
 } from "@globe2/shared";
 import {
   CircleIcon,
+  KeyIcon,
+  LockIcon,
   MinusIcon,
-  PauseIcon,
   PlayIcon,
   PlusIcon,
   XIcon,
@@ -45,19 +46,17 @@ const visitStorageKey = "globe2.visitId";
 const revisionStorageKey = "globe2.lastSeenRevision";
 const colorStorageKey = "globe2.color";
 const brushStorageKey = "globe2.brushSize";
-const autoRotateSpeed = 0.18;
-const autoRotateSecondarySpeed = 0.045;
-const inertiaDamping = 0.92;
+const viewStorageKey = "globe2.viewState";
+const autoRotateSpeed = -0.4;
+const autoRotateSecondarySpeed = 0.1;
+const inertiaDamping = 0.95;
 const minInertiaVelocity = 0.00035;
 const startInertiaVelocity = 0.0022;
 const wheelRotateSpeed = 0.0015;
-const wheelInertiaDamping = 0.94;
-const wheelInertiaBoost = 0.42;
-const wheelInertiaAccumulation = 0.55;
-const maxWheelInertiaDelta = 120;
-const minWheelInertiaDelta = 0.08;
-const startWheelInertiaDelta = 1.8;
-const urlReplaceDelay = 250;
+const keyboardRotateSpeed = 0.006;
+const keyboardZoomStep = 0.15;
+const trackpadPixelThreshold = 40;
+const viewStorageDelay = 250;
 const overlayFaceSize = 1024;
 const farZoomOrthographicSize = 3.8;
 const closeZoomOrthographicSize = 1.25;
@@ -72,7 +71,6 @@ type QuaternionState = {
 type ViewState = {
   zoom: number;
   orientation: QuaternionState;
-  autoRotateEnabled: boolean;
 };
 
 export function App() {
@@ -83,7 +81,10 @@ export function App() {
     "connecting" | "connected" | "offline"
   >("connecting");
   const [viewState, setViewState] = useState<ViewState>(() =>
-    readViewStateFromUrl(),
+    readStoredViewState(),
+  );
+  const [screensaverMode, setScreensaverMode] = useState(() =>
+    readScreensaverModeFromUrl(),
   );
   const [selectedColor, setSelectedColor] = useState<DrawingColor>(() =>
     readStoredColor(),
@@ -92,15 +93,18 @@ export function App() {
     readStoredBrushSize(),
   );
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [drawingLocked, setDrawingLocked] = useState(false);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const viewStateRef = useRef(viewState);
-  const flushUrlRef = useRef<() => void>(() => undefined);
+  const flushStoredViewRef = useRef<() => void>(() => undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const toolRef = useRef({
     color: selectedColor,
     brushSize: selectedBrushSize,
   });
   const connectionStateRef = useRef(connectionState);
+  const screensaverModeRef = useRef(screensaverMode);
+  const drawingLockedRef = useRef(drawingLocked);
   const drawingsRef = useRef<Drawing[]>([]);
   const eventQueueRef = useRef<
     Array<
@@ -111,29 +115,40 @@ export function App() {
             | "drawing_committed"
             | "stroke_started"
             | "stroke_updated"
-            | "stroke_cancelled";
+            | "stroke_cancelled"
+            | "snapshot_promoted";
         }
       >
     >
   >([]);
 
-  const drawingMode = isDrawingZoom(viewState.zoom);
-  const autoRotateActive = viewState.autoRotateEnabled && !drawingMode;
+  const drawingMode = !screensaverMode && isDrawingZoom(viewState.zoom);
   const zoomProgress =
     ((viewState.zoom - viewSettings.minZoom) /
       (viewSettings.maxZoom - viewSettings.minZoom)) *
     100;
+  const zoomMarkerOffsetPx = 8 - (16 * zoomProgress) / 100;
   const drawingZoomThresholdProgress =
     ((viewSettings.drawingZoomThreshold - viewSettings.minZoom) /
       (viewSettings.maxZoom - viewSettings.minZoom)) *
     100;
   const panelClass = "pointer-events-auto bg-neutral-400";
-  const buttonClass = "pointer-events-auto cursor-pointer bg-neutral-400";
+  const buttonClass = "pointer-events-auto cursor-pointer bg-neutral-400 focus:outline-none";
   const iconClass = "size-4 shrink-0";
   const brushIconSize: Record<BrushSize, string> = {
     fine: "size-3",
     bold: "size-5",
   };
+  const statusOverlay =
+    bootstrap.status === "error"
+      ? { tone: "error" as const, message: bootstrap.message }
+      : bootstrap.status === "loading"
+        ? { tone: "loading" as const, message: "Loading" }
+        : connectionState === "connecting"
+          ? { tone: "loading" as const, message: "Connecting" }
+          : connectionState === "offline"
+            ? { tone: "error" as const, message: "Connection lost" }
+            : undefined;
 
   useEffect(() => {
     viewStateRef.current = viewState;
@@ -146,6 +161,20 @@ export function App() {
   useEffect(() => {
     connectionStateRef.current = connectionState;
   }, [connectionState]);
+
+  useEffect(() => {
+    screensaverModeRef.current = screensaverMode;
+  }, [screensaverMode]);
+
+  useEffect(() => {
+    drawingLockedRef.current = drawingLocked;
+  }, [drawingLocked]);
+
+  useEffect(() => {
+    if (!drawingMode && drawingLocked) {
+      setDrawingLocked(false);
+    }
+  }, [drawingLocked, drawingMode]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -279,7 +308,8 @@ export function App() {
           serverEvent.type === "stroke_started" ||
           serverEvent.type === "stroke_updated" ||
           serverEvent.type === "stroke_cancelled" ||
-          serverEvent.type === "drawing_committed"
+          serverEvent.type === "drawing_committed" ||
+          serverEvent.type === "snapshot_promoted"
         ) {
           eventQueueRef.current.push(serverEvent);
         }
@@ -385,7 +415,7 @@ export function App() {
           vec3 committedPaint = mix(paint, overlay.rgb, overlay.a);
           vec3 spherePaint = mix(committedPaint, transientOverlay.rgb, transientOverlay.a);
           float rim = 1.0 - smoothstep(0.0, 0.55, abs(viewNormal.z));
-          vec3 shadedPaint = mix(spherePaint, vec3(0.62), rim * 0.32);
+          vec3 shadedPaint = spherePaint * (1.0 - rim * 0.32);
           gl_FragColor = vec4(shadedPaint, 1.0);
         }
       `,
@@ -427,10 +457,7 @@ export function App() {
       axis: new THREE.Vector3(0, 1, 0),
       speed: 0,
     };
-    const wheelInertia = {
-      deltaX: 0,
-      deltaY: 0,
-    };
+    const keysPressed = new Set<string>();
     const releaseVelocity = {
       axis: new THREE.Vector3(0, 1, 0),
       speed: 0,
@@ -460,33 +487,33 @@ export function App() {
     let lastPinchDistance: number | undefined;
     let pendingMultiTouchRotation = false;
     let frameId = 0;
-    let urlTimeout: number | undefined;
+    let viewStorageTimeout: number | undefined;
 
-    const scheduleUrlUpdate = () => {
-      if (urlTimeout) {
-        window.clearTimeout(urlTimeout);
+    const scheduleViewStorageUpdate = () => {
+      if (viewStorageTimeout) {
+        window.clearTimeout(viewStorageTimeout);
       }
 
-      urlTimeout = window.setTimeout(flushUrl, urlReplaceDelay);
+      viewStorageTimeout = window.setTimeout(flushStoredView, viewStorageDelay);
     };
 
-    function flushUrl() {
-      if (urlTimeout) {
-        window.clearTimeout(urlTimeout);
-        urlTimeout = undefined;
+    function flushStoredView() {
+      if (viewStorageTimeout) {
+        window.clearTimeout(viewStorageTimeout);
+        viewStorageTimeout = undefined;
       }
 
-      writeViewStateToUrl(viewStateRef.current);
+      writeStoredViewState(viewStateRef.current);
     }
 
-    flushUrlRef.current = flushUrl;
+    flushStoredViewRef.current = flushStoredView;
 
-    const updateView = (next: ViewState, writeUrl = true) => {
+    const updateView = (next: ViewState, writeStorage = true) => {
       viewStateRef.current = next;
       setViewState(next);
 
-      if (writeUrl) {
-        scheduleUrlUpdate();
+      if (writeStorage) {
+        scheduleViewStorageUpdate();
       }
     };
 
@@ -511,7 +538,6 @@ export function App() {
       updateView({
         ...viewStateRef.current,
         orientation: quaternionToState(orientation),
-        autoRotateEnabled: false,
       });
 
       if (elapsedMs > 0) {
@@ -526,16 +552,25 @@ export function App() {
     };
 
     const onPointerDown = (event: PointerEvent) => {
+      if (screensaverModeRef.current) {
+        exitScreensaverMode();
+        return;
+      }
+
       touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       renderer.domElement.setPointerCapture(event.pointerId);
 
+      if (drawingLockedRef.current && touches.size >= 2) {
+        stopInertia(inertiaVelocity, releaseVelocity);
+        return;
+      }
+
       const shouldRotate =
-        !isDrawingZoom(viewStateRef.current.zoom) || touches.size >= 2;
+        !drawingLockedRef.current &&
+        (!isDrawingZoom(viewStateRef.current.zoom) || touches.size >= 2);
 
       if (!shouldRotate) {
         stopInertia(inertiaVelocity, releaseVelocity);
-        wheelInertia.deltaX = 0;
-        wheelInertia.deltaY = 0;
         const point = spherePointFromPointer(
           event,
           renderer,
@@ -602,8 +637,6 @@ export function App() {
       lastPinchDistance =
         touches.size >= 2 ? pinchDistance(touches) : undefined;
       stopInertia(inertiaVelocity, releaseVelocity);
-      wheelInertia.deltaX = 0;
-      wheelInertia.deltaY = 0;
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -611,7 +644,7 @@ export function App() {
         touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       }
 
-      if (touches.size >= 2) {
+      if (!drawingLockedRef.current && touches.size >= 2) {
         const distance = pinchDistance(touches);
         if (lastPinchDistance !== undefined) {
           setZoom(
@@ -751,14 +784,16 @@ export function App() {
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
 
-      if (event.ctrlKey || event.metaKey) {
-        wheelInertia.deltaX = 0;
-        wheelInertia.deltaY = 0;
+      if (drawingLockedRef.current) {
+        stopInertia(inertiaVelocity, releaseVelocity);
+        return;
+      }
+
+      if (screensaverModeRef.current || event.ctrlKey || event.metaKey) {
         setZoom(viewStateRef.current.zoom - event.deltaY * 0.0012);
         return;
       }
 
-      stopInertia(inertiaVelocity, releaseVelocity);
       const verticalDelta = new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(1, 0, 0),
         -event.deltaY * wheelRotateSpeed,
@@ -767,40 +802,38 @@ export function App() {
         new THREE.Vector3(0, 1, 0),
         -event.deltaX * wheelRotateSpeed,
       );
-      const orientation = horizontalDelta
-        .multiply(verticalDelta)
+      const rotationDelta = horizontalDelta.multiply(verticalDelta).normalize();
+      const orientation = rotationDelta
+        .clone()
         .multiply(quaternionStateToThree(viewStateRef.current.orientation))
         .normalize();
-      updateView({
-        ...viewStateRef.current,
-        orientation: quaternionToState(orientation),
-        autoRotateEnabled: false,
-      });
-      const nextWheelDeltaX =
-        wheelInertia.deltaX * wheelInertiaAccumulation +
-        event.deltaX * wheelInertiaBoost;
-      const nextWheelDeltaY =
-        wheelInertia.deltaY * wheelInertiaAccumulation +
-        event.deltaY * wheelInertiaBoost;
-      const nextWheelMagnitude = Math.hypot(nextWheelDeltaX, nextWheelDeltaY);
+      updateView({ ...viewStateRef.current, orientation: quaternionToState(orientation) });
 
-      if (nextWheelMagnitude >= startWheelInertiaDelta) {
-        const clampedScale = Math.min(
-          1,
-          maxWheelInertiaDelta / nextWheelMagnitude,
-        );
-        wheelInertia.deltaX = nextWheelDeltaX * clampedScale;
-        wheelInertia.deltaY = nextWheelDeltaY * clampedScale;
-      } else {
-        wheelInertia.deltaX = 0;
-        wheelInertia.deltaY = 0;
+      const isTrackpad =
+        event.deltaMode === 0 &&
+        Math.abs(event.deltaY) < trackpadPixelThreshold &&
+        Math.abs(event.deltaX) < trackpadPixelThreshold;
+
+      if (!isTrackpad) {
+        const axisAngle = quaternionToAxisAngle(rotationDelta);
+        if (axisAngle.angle > 0) {
+          const invOrientation = quaternionStateToThree(viewStateRef.current.orientation).invert();
+          inertiaVelocity.axis.copy(axisAngle.axis).applyQuaternion(invOrientation);
+          inertiaVelocity.speed =
+            inertiaVelocity.speed * 0.5 + (axisAngle.angle / 16) * 0.5;
+        }
       }
     };
 
     const onResize = () => {
       const width = host.clientWidth;
       const height = host.clientHeight;
-      updateOrthographicCamera(camera, width, height, viewStateRef.current.zoom);
+      updateOrthographicCamera(
+        camera,
+        width,
+        height,
+        viewStateRef.current.zoom,
+      );
       renderer.setSize(width, height);
     };
 
@@ -892,11 +925,29 @@ export function App() {
             repaintOverlay(transientOverlay, transientStrokes.values());
           }
         }
+
+        if (event.type === "snapshot_promoted") {
+          const bakedIds = new Set(event.bakedDrawingIds ?? []);
+          drawingsRef.current = drawingsRef.current.filter((d) => !bakedIds.has(d.id));
+          repaintOverlay(overlay, drawingsRef.current);
+          overlay.texture.needsUpdate = true;
+
+          const faceUrls = cubeFaceNames.map((face) => event.faces[face]?.url ?? "");
+          if (faceUrls.every(Boolean)) {
+            const textureLoader = new THREE.CubeTextureLoader();
+            textureLoader.load(faceUrls, (texture: THREE.CubeTexture) => {
+              texture.colorSpace = THREE.SRGBColorSpace;
+              material.uniforms.cubeMap.value = texture;
+              material.needsUpdate = true;
+            });
+          }
+        }
       }
 
-      if (current.autoRotateEnabled && !isDrawingZoom(current.zoom)) {
-        const orientation = quaternionStateToThree(current.orientation)
-          .multiply(autoRotateStep(frameMs))
+      if (screensaverModeRef.current) {
+        const step = autoRotateStep(frameMs);
+        const orientation = step
+          .multiply(quaternionStateToThree(current.orientation))
           .normalize();
         updateView(
           {
@@ -905,37 +956,7 @@ export function App() {
           },
           false,
         );
-      } else if (
-        !pointer.active &&
-        (Math.abs(wheelInertia.deltaX) > minWheelInertiaDelta ||
-          Math.abs(wheelInertia.deltaY) > minWheelInertiaDelta)
-      ) {
-        const frameScale = frameMs / 16;
-        const verticalDelta = new THREE.Quaternion().setFromAxisAngle(
-          new THREE.Vector3(1, 0, 0),
-          -wheelInertia.deltaY * wheelRotateSpeed * frameScale,
-        );
-        const horizontalDelta = new THREE.Quaternion().setFromAxisAngle(
-          new THREE.Vector3(0, 1, 0),
-          -wheelInertia.deltaX * wheelRotateSpeed * frameScale,
-        );
-        const orientation = horizontalDelta
-          .multiply(verticalDelta)
-          .multiply(quaternionStateToThree(current.orientation))
-          .normalize();
-        updateView(
-          {
-            ...current,
-            orientation: quaternionToState(orientation),
-          },
-          true,
-        );
-        wheelInertia.deltaX *= wheelInertiaDamping;
-        wheelInertia.deltaY *= wheelInertiaDamping;
-      } else if (
-        !pointer.active &&
-        inertiaVelocity.speed > minInertiaVelocity
-      ) {
+      } else if (!pointer.active && inertiaVelocity.speed > minInertiaVelocity) {
         const delta = new THREE.Quaternion().setFromAxisAngle(
           inertiaVelocity.axis,
           inertiaVelocity.speed * frameMs,
@@ -943,14 +964,45 @@ export function App() {
         const orientation = quaternionStateToThree(current.orientation)
           .multiply(delta)
           .normalize();
-        updateView(
-          {
-            ...current,
-            orientation: quaternionToState(orientation),
-          },
-          true,
-        );
+        updateView({ ...current, orientation: quaternionToState(orientation) }, true);
         inertiaVelocity.speed *= inertiaDamping;
+      }
+
+      if (!screensaverModeRef.current && keysPressed.size > 0) {
+        const dx =
+          (keysPressed.has("ArrowRight") ? 1 : 0) +
+          (keysPressed.has("ArrowLeft") ? -1 : 0);
+        const dy =
+          (keysPressed.has("ArrowDown") ? 1 : 0) +
+          (keysPressed.has("ArrowUp") ? -1 : 0);
+        if (dx !== 0 || dy !== 0) {
+          const viewSize =
+            farZoomOrthographicSize -
+            clampZoom(viewStateRef.current.zoom) *
+              (farZoomOrthographicSize - closeZoomOrthographicSize);
+          const zoomScale = viewSize / farZoomOrthographicSize;
+          const angle = keyboardRotateSpeed * frameMs * zoomScale;
+          const verticalDelta = new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(1, 0, 0),
+            -dy * angle,
+          );
+          const horizontalDelta = new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(0, 1, 0),
+            -dx * angle,
+          );
+          const keyDelta = horizontalDelta.multiply(verticalDelta).normalize();
+          const orientation = keyDelta
+            .clone()
+            .multiply(quaternionStateToThree(viewStateRef.current.orientation))
+            .normalize();
+          updateView({ ...viewStateRef.current, orientation: quaternionToState(orientation) });
+          const axisAngle = quaternionToAxisAngle(keyDelta);
+          if (axisAngle.angle > 0) {
+            const invOrientation = quaternionStateToThree(viewStateRef.current.orientation).invert();
+            releaseVelocity.axis.copy(axisAngle.axis).applyQuaternion(invOrientation);
+            releaseVelocity.speed = axisAngle.angle / frameMs;
+          }
+        }
       }
 
       updateOrthographicCamera(
@@ -966,19 +1018,46 @@ export function App() {
       frameId = window.requestAnimationFrame(animate);
     };
 
+    const rotationKeys = new Set([
+      "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+    ]);
+    const onRotationKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) return;
+      if (!rotationKeys.has(event.key)) return;
+      if (event.key.startsWith("Arrow")) event.preventDefault();
+      if (keysPressed.size === 0) stopInertia(inertiaVelocity, releaseVelocity);
+      keysPressed.add(event.key);
+    };
+    const onRotationKeyUp = (event: KeyboardEvent) => {
+      if (!rotationKeys.has(event.key)) return;
+      keysPressed.delete(event.key);
+      if (keysPressed.size === 0 && releaseVelocity.speed >= startInertiaVelocity) {
+        inertiaVelocity.axis.copy(releaseVelocity.axis);
+        inertiaVelocity.speed = releaseVelocity.speed;
+      }
+    };
+
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointermove", onPointerMove);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
     renderer.domElement.addEventListener("pointercancel", onPointerUp);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onRotationKeyDown);
+    window.addEventListener("keyup", onRotationKeyUp);
     window.addEventListener("resize", onResize);
     window.visualViewport?.addEventListener("resize", onResize);
     onResize();
+    previousFrameAt = performance.now();
     animate();
 
     return () => {
-      flushUrl();
+      flushStoredView();
       window.cancelAnimationFrame(frameId);
+      window.removeEventListener("keydown", onRotationKeyDown);
+      window.removeEventListener("keyup", onRotationKeyUp);
       window.removeEventListener("resize", onResize);
       window.visualViewport?.removeEventListener("resize", onResize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
@@ -995,7 +1074,9 @@ export function App() {
       fallbackTexture.dispose();
       renderer.dispose();
     };
-  }, [bootstrap.status === "ready" ? bootstrap.snapshotFaces : undefined]);
+  }, [
+    bootstrap.status === "ready" ? bootstrap.snapshotFaces : undefined,
+  ]);
 
   const sendClientMessage = (message: unknown) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -1009,157 +1090,255 @@ export function App() {
     setViewState((current) => {
       const next = updater(current);
       viewStateRef.current = next;
-      window.setTimeout(() => flushUrlRef.current(), 0);
+      window.setTimeout(() => flushStoredViewRef.current(), 0);
       return next;
     });
   };
 
+  const enterScreensaverMode = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.set("screensaver", "1");
+    const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+    setScreensaverMode(true);
+  };
+
+  const exitScreensaverMode = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("screensaver");
+    params.delete("mode");
+    const search = params.toString();
+    const nextUrl = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+    setScreensaverMode(false);
+  };
+
+  useEffect(() => {
+    if (!screensaverMode) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        exitScreensaverMode();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [screensaverMode]);
+
+  useEffect(() => {
+    if (screensaverMode) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) return;
+
+      if (event.key === " ") {
+        event.preventDefault();
+        updateViewFromControls((current) => ({
+          ...current,
+          zoom:
+            current.zoom >= viewSettings.drawingZoomThreshold
+              ? viewSettings.minZoom
+              : viewSettings.comfortableDrawingZoom,
+        }));
+        return;
+      }
+
+      if (event.key === "+" || event.key === "=" || event.key === "-") {
+        event.preventDefault();
+        const direction = event.key === "-" ? -1 : 1;
+        updateViewFromControls((current) => ({
+          ...current,
+          zoom: clampZoom(current.zoom + direction * keyboardZoomStep),
+        }));
+        return;
+      }
+
+      if (/^[0-9]$/.test(event.key)) {
+        event.preventDefault();
+        const paletteIndex = event.key === "0" ? 9 : Number(event.key) - 1;
+        const color = drawingPalette[paletteIndex];
+        if (color) {
+          setSelectedColor(color);
+        }
+        return;
+      }
+
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        setSelectedBrushSize((brushSize) =>
+          brushSize === "fine" ? "bold" : "fine",
+        );
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [screensaverMode]);
+
   return (
     <main className="relative h-dvh min-h-dvh w-screen overflow-hidden">
       <section
-        className="fixed inset-0 grid h-dvh min-h-dvh min-w-0 place-items-center bg-neutral-800"
+        className="fixed inset-0 grid h-dvh min-h-dvh min-w-0 place-items-center bg-neutral-900"
         aria-label="Shared drawing sphere"
       >
         <div
           ref={canvasHostRef}
           className={`absolute inset-0 h-full w-full touch-none [&_canvas]:block [&_canvas]:h-full [&_canvas]:w-full [&_canvas]:drop-shadow-[0_28px_70px_rgb(255_255_255_/_0.16)] ${
-            drawingMode
-              ? "cursor-crosshair"
-              : "cursor-grab active:cursor-grabbing"
+            screensaverMode
+              ? "cursor-default"
+              : drawingMode
+                ? "cursor-crosshair"
+                : "cursor-grab active:cursor-grabbing"
           }`}
         />
       </section>
 
-      <header
-        className="pointer-events-none fixed inset-x-0 top-0 z-5 flex"
-        aria-label="World status"
-      >
-        <label className={`${panelClass} grid rounded-full overflow-hidden`}>
-          <span className="relative block h-12 w-32 overflow-hidden">
-            <span
-              className="pointer-events-none absolute inset-y-0 left-0 bg-neutral-600"
-              style={{ width: `${zoomProgress}%` }}
-              aria-hidden="true"
-            />
-            <span
-              className="pointer-events-none absolute inset-y-0 w-px bg-neutral-950"
-              style={{ left: `${drawingZoomThresholdProgress}%` }}
-              aria-hidden="true"
-            />
-            <input
-              className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-transparent opacity-0"
-              type="range"
-              min={viewSettings.minZoom}
-              max={viewSettings.maxZoom}
-              step="0.01"
-              value={viewState.zoom}
-              onChange={(event) =>
-                updateViewFromControls((current) => ({
-                  ...current,
-                  zoom: clampZoom(Number(event.target.value)),
-                }))
-              }
-              aria-label="Zoom"
-            />
-          </span>
-        </label>
-        <button
-          type="button"
-          className={`${buttonClass} w-12 h-12 grid place-items-center cursor-pointer`}
-          aria-label={drawingMode ? "Zoom out" : "Zoom in to draw"}
-          onClick={() =>
-            updateViewFromControls((current) => ({
-              ...current,
-              zoom: drawingMode
-                ? viewSettings.minZoom
-                : viewSettings.comfortableDrawingZoom,
-            }))
-          }
+      {statusOverlay ? (
+        <div
+          className="pointer-events-none fixed inset-0 z-8 grid place-items-center px-6"
+          aria-live="polite"
         >
-          {drawingMode ? (
-            <MinusIcon className={iconClass} aria-hidden="true" />
-          ) : (
-            <PlusIcon className={iconClass} aria-hidden="true" />
-          )}
-        </button>
-
-        <div className={`grow`}></div>
-
-        {!drawingMode ? (
-          <button
-            type="button"
-            className={`${buttonClass} w-12 h-12 grid place-items-center`}
-            onClick={() =>
-              updateViewFromControls((current) => ({
-                ...current,
-                autoRotateEnabled: !current.autoRotateEnabled,
-              }))
-            }
-          >
-            {viewState.autoRotateEnabled ? (
-              <PauseIcon
-                className={iconClass}
-                fill="currentColor"
-                aria-hidden="true"
-              />
-            ) : (
-              <PlayIcon
-                className={iconClass}
-                fill="currentColor"
-                aria-hidden="true"
-              />
-            )}
-            <div className="hidden">
-              {viewState.autoRotateEnabled
-                ? autoRotateActive
-                  ? "Auto-rotate on"
-                  : "Auto suspended"
-                : "Auto-rotate off"}
-            </div>
-          </button>
-        ) : null}
-
-        <div className={`${panelClass} h-12 w-24 relative flex rounded-full`}>
           <div
-            className={`absolute left-1 top-0 w-1/2 h-12 grid place-items-center ${
-              connectionState === "connected"
-                ? "text-green-800"
-                : connectionState === "offline"
-                  ? "text-red-800"
-                  : "text-yellow-800"
+            className={`max-w-sm bg-neutral-400 px-6 py-4 text-center shadow-2xl ${
+              statusOverlay.tone === "loading" ? "animate-pulse" : ""
+            } ${
+              statusOverlay.tone === "error" ? "text-red-800" : "text-neutral-950"
             }`}
-            aria-live="polite"
+            role={statusOverlay.tone === "error" ? "alert" : "status"}
           >
-            <CircleIcon className={`${iconClass}`} fill="currentColor" />
-          </div>
-
-          <div className="w-full absolute left-0 top-0 h-12 flex items-center justify-end pr-6">
-            {bootstrap.status === "ready"
-              ? `${bootstrap.presenceCount}`
-              : bootstrap.status === "loading"
-                ? "0"
-                : "0"}
-
-            <div className="hidden">
-              {bootstrap.status === "ready"
-                ? `${bootstrap.presenceCount} present`
-                : bootstrap.status === "loading"
-                  ? "connecting"
-                  : "offline"}
-            </div>
+            {statusOverlay.message}
           </div>
         </div>
-        <button
-          type="button"
-          className={`${buttonClass} w-12 h-12 grid place-items-center cursor-pointer`}
-          aria-label="About this project"
-          onClick={() => setAboutOpen(true)}
+      ) : null}
+
+      {!screensaverMode ? (
+        <header
+          className="pointer-events-none fixed inset-x-0 top-0 z-5 flex"
+          aria-label="World status"
         >
-          <span className="text-base leading-none" aria-hidden="true">
-            ?
-          </span>
-        </button>
-      </header>
+          {!drawingLocked ? (
+            <>
+              <button
+                type="button"
+                className={`${buttonClass} w-12 h-12 grid place-items-center cursor-pointer`}
+                aria-label={drawingMode ? "Zoom out" : "Zoom in to draw"}
+                onClick={() =>
+                  updateViewFromControls((current) => ({
+                    ...current,
+                    zoom: drawingMode
+                      ? viewSettings.minZoom
+                      : viewSettings.comfortableDrawingZoom,
+                  }))
+                }
+              >
+                {drawingMode ? (
+                  <MinusIcon className={iconClass} aria-hidden="true" />
+                ) : (
+                  <PlusIcon className={iconClass} aria-hidden="true" />
+                )}
+              </button>
+              <label
+                className={`${panelClass} grid rounded-full overflow-hidden`}
+              >
+                <span className="relative block h-12 w-32 overflow-hidden">
+                  <span
+                    className="pointer-events-none absolute top-1/2 z-10 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black"
+                    style={{ left: `calc(${zoomProgress}% + ${zoomMarkerOffsetPx}px)` }}
+                    aria-hidden="true"
+                  />
+                  <span
+                    className="pointer-events-none absolute inset-y-0 right-0 bg-neutral-500/50"
+                    style={{ left: `${drawingZoomThresholdProgress}%` }}
+                    aria-hidden="true"
+                  />
+                  <input
+                    className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-transparent opacity-0"
+                    type="range"
+                    min={viewSettings.minZoom}
+                    max={viewSettings.maxZoom}
+                    step="0.01"
+                    value={viewState.zoom}
+                    onChange={(event) =>
+                      updateViewFromControls((current) => ({
+                        ...current,
+                        zoom: clampZoom(Number(event.target.value)),
+                      }))
+                    }
+                    aria-label="Zoom"
+                  />
+                </span>
+              </label>
+            </>
+          ) : null}
+
+          <div className={`grow`}></div>
+
+          {drawingMode ? (
+            <button
+              type="button"
+              className={`${buttonClass} w-12 h-12 grid place-items-center`}
+              aria-label={
+                drawingLocked ? "Unlock drawing view" : "Lock drawing view"
+              }
+              onClick={() => setDrawingLocked((locked) => !locked)}
+            >
+              {drawingLocked ? (
+                <KeyIcon className={iconClass} aria-hidden="true" />
+              ) : (
+                <LockIcon className={iconClass} aria-hidden="true" />
+              )}
+            </button>
+          ) : null}
+
+          <div className={`${panelClass} h-12 w-24 relative flex rounded-full`}>
+            <div
+              className={`absolute left-1 top-0 w-1/2 h-12 grid place-items-center ${
+                connectionState === "connected"
+                  ? "text-green-800"
+                  : connectionState === "offline"
+                    ? "text-red-800"
+                    : "text-yellow-800"
+              }`}
+            >
+              <CircleIcon className={`${iconClass}`} fill="currentColor" aria-hidden="true" />
+            </div>
+
+            <div
+              className="w-full absolute left-0 top-0 h-12 flex items-center justify-end pr-4"
+              aria-live="polite"
+            >
+              {connectionState === "connected"
+                ? bootstrap.status === "ready"
+                  ? bootstrap.presenceCount
+                  : null
+                : connectionState === "offline"
+                  ? "0"
+                  : null}
+              <span className="sr-only">
+                {connectionState === "connected"
+                  ? `${bootstrap.status === "ready" ? bootstrap.presenceCount : 0} present`
+                  : connectionState === "offline"
+                    ? "Offline"
+                    : "Connecting"}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            className={`${buttonClass} w-12 h-12 grid place-items-center cursor-pointer`}
+            aria-label="About this project"
+            onClick={() => setAboutOpen(true)}
+          >
+            <span className="text-base leading-none" aria-hidden="true">
+              ?
+            </span>
+          </button>
+        </header>
+      ) : null}
 
       {aboutOpen ? (
         <div
@@ -1178,149 +1357,163 @@ export function App() {
           </button>
 
           <div className="max-w-xl text-left">
-            <h1 id="about-title" className="m-0 text-3xl font-semibold">
-              Globe2
+            <h1 id="about-title" className="m-0">
+              Sphere Paint
             </h1>
-            <p className="mt-5 text-base leading-7 text-neutral-300">
-              Globe2 is a shared drawing world on a single rotating sphere.
-              Visitors can zoom in, draw persistent marks on the surface, and
-              watch the globe accumulate contributions over time. There are no
-              accounts or separate canvases here, just one public place that
-              changes as people add to it.
-            </p>
+            <p className="mt-[0.5lh] text-neutral-400">
+Collaboratively paint a sphere. Zoom in to draw and zoom out to get a global view. All marks are public and permanent (until they're drawn over).
+           </p>
+            <p className="mt-[0.5lh] text-neutral-400">
+A <a className="underline text-neutral-200" href="https://constraint.systems/" target="_blank">Constraint Systems</a> project</p>
           </div>
         </div>
       ) : null}
 
-      <aside
-        className="pointer-events-none fixed inset-x-0 bottom-0 z-5 flex justify-between"
-        aria-label="Drawing controls"
-      >
-        {drawingMode ? (
-          <>
-            <div
-              className="grid grid-cols-10 max-[640px]:grid-cols-5"
-              aria-label="Drawing palette"
-            >
-              {drawingPalette.map((color) => (
-                <button
-                  key={color}
-                  type="button"
-                  className={`w-12 h-12 pointer-events-auto cursor-pointer ${
-                    selectedColor === color ? "rounded-full" : ""
-                  }`}
-                  style={{ backgroundColor: color }}
-                  aria-label={color}
-                  disabled={connectionState !== "connected"}
-                  onClick={() => setSelectedColor(color)}
-                />
-              ))}
-            </div>
-
-            <div className="flex max-[640px]:flex-col">
-              {brushSizes.map((brushSize) => (
-                <button
-                  key={brushSize}
-                  type="button"
-                  className={`cursor-pointer bg-neutral-400 pointer-events-auto w-12 grid place-items-center h-12 ${selectedBrushSize === brushSize ? "rounded-full" : ""}`}
-                  disabled={connectionState !== "connected"}
-                  aria-label={`${brushSize} brush`}
-                  onClick={() => setSelectedBrushSize(brushSize)}
-                >
-                  <CircleIcon
-                    className={`${brushIconSize[brushSize]} fill-current`}
-                    aria-hidden="true"
+      {!screensaverMode ? (
+        <aside
+          className="pointer-events-none fixed inset-x-0 bottom-0 z-5 flex justify-between"
+          aria-label="Drawing controls"
+        >
+          {drawingMode ? (
+            <>
+              <div
+                className="grid grid-cols-10 max-[640px]:grid-cols-5"
+                aria-label="Drawing palette"
+              >
+                {drawingPalette.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    className={`w-12 h-12 pointer-events-auto cursor-pointer ${
+                      selectedColor === color ? "rounded-full" : ""
+                    }`}
+                    style={{ backgroundColor: color }}
+                    aria-label={color}
+                    disabled={connectionState !== "connected"}
+                    onClick={() => setSelectedColor(color)}
                   />
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <button
-            type="button"
-            className={`${buttonClass} w-full h-12`}
-            onClick={() =>
-              updateViewFromControls((current) => ({
-                ...current,
-                zoom: viewSettings.comfortableDrawingZoom,
-              }))
-            }
-          >
-            Zoom in to draw
-          </button>
-        )}
+                ))}
+              </div>
 
-        {bootstrap.status === "error" ? (
-          <p className={`${panelClass} m-0 px-3 py-2 text-red-700`}>
-            {bootstrap.message}
-          </p>
-        ) : null}
-      </aside>
+              <div className="flex max-[640px]:flex-col">
+                {brushSizes.map((brushSize) => (
+                  <button
+                    key={brushSize}
+                    type="button"
+                    className={`cursor-pointer bg-neutral-400 pointer-events-auto w-12 grid place-items-center h-12 ${selectedBrushSize === brushSize ? "rounded-full" : ""}`}
+                    disabled={connectionState !== "connected"}
+                    aria-label={`${brushSize} brush`}
+                    onClick={() => setSelectedBrushSize(brushSize)}
+                  >
+                    <CircleIcon
+                      className={`${brushIconSize[brushSize]} fill-current`}
+                      aria-hidden="true"
+                    />
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="relative w-full flex h-12 justify-between">
+              <button
+                type="button"
+                className={`${buttonClass} relative px-4 h-12 inline-flex items-center gap-2`}
+                onClick={() =>
+                  updateViewFromControls((current) => ({
+                    ...current,
+                    zoom: viewSettings.comfortableDrawingZoom,
+                  }))
+                }
+              >
+                Zoom in to draw
+                <span
+                  className="hidden ml-[1ch] pointer-fine:block text-neutral-600"
+                  aria-hidden="true"
+                >
+[space]
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className={`${buttonClass} w-12 h-12 grid place-items-center`}
+                aria-label="Enter screensaver mode"
+                onClick={enterScreensaverMode}
+              >
+                <PlayIcon fill="currentColor" className={iconClass} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
+        </aside>
+      ) : null}
     </main>
   );
 }
 
-function readViewStateFromUrl(): ViewState {
+function readScreensaverModeFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  const zoom = clampZoom(
-    readFiniteNumber(params.get("z"), viewSettings.initialZoom),
+  return (
+    params.get("screensaver") === "1" || params.get("mode") === "screensaver"
   );
-  const orientation = readOrientationFromUrl(params);
+}
 
-  return {
-    zoom,
-    orientation: orientation ?? identityQuaternionState(),
-    autoRotateEnabled: params.get("view") !== "manual" || !orientation,
+function readStoredViewState(): ViewState {
+  const fallback = {
+    zoom: viewSettings.initialZoom,
+    orientation: identityQuaternionState(),
   };
-}
+  const storedValue = window.localStorage.getItem(viewStorageKey);
 
-function writeViewStateToUrl(viewState: ViewState) {
-  const params = new URLSearchParams(window.location.search);
-  params.set("z", viewState.zoom.toFixed(2));
-
-  if (viewState.autoRotateEnabled) {
-    params.set("view", "auto");
-    params.delete("qx");
-    params.delete("qy");
-    params.delete("qz");
-    params.delete("qw");
-    params.delete("yaw");
-    params.delete("pitch");
-  } else {
-    const orientation =
-      normalizeQuaternionState(viewState.orientation) ??
-      identityQuaternionState();
-    params.set("view", "manual");
-    params.set("qx", orientation.x.toFixed(5));
-    params.set("qy", orientation.y.toFixed(5));
-    params.set("qz", orientation.z.toFixed(5));
-    params.set("qw", orientation.w.toFixed(5));
-    params.delete("yaw");
-    params.delete("pitch");
+  if (!storedValue) {
+    return fallback;
   }
 
-  const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
-  window.history.replaceState(null, "", nextUrl);
+  try {
+    const parsed = JSON.parse(storedValue) as Partial<ViewState>;
+    const orientation = isQuaternionState(parsed.orientation)
+      ? normalizeQuaternionState(parsed.orientation)
+      : undefined;
+    const zoom =
+      typeof parsed.zoom === "number" && Number.isFinite(parsed.zoom)
+        ? clampZoom(parsed.zoom)
+        : fallback.zoom;
+
+    return {
+      zoom,
+      orientation: orientation ?? fallback.orientation,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
-function readFiniteNumber(value: string | null, fallback: number) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : fallback;
-}
-
-function readOrientationFromUrl(
-  params: URLSearchParams,
-): QuaternionState | undefined {
-  if (params.get("view") !== "manual") {
-    return identityQuaternionState();
+function isQuaternionState(value: unknown): value is QuaternionState {
+  if (!value || typeof value !== "object") {
+    return false;
   }
 
-  return normalizeQuaternionState({
-    x: readFiniteNumber(params.get("qx"), Number.NaN),
-    y: readFiniteNumber(params.get("qy"), Number.NaN),
-    z: readFiniteNumber(params.get("qz"), Number.NaN),
-    w: readFiniteNumber(params.get("qw"), Number.NaN),
-  });
+  const candidate = value as Partial<Record<keyof QuaternionState, unknown>>;
+  return (
+    typeof candidate.x === "number" &&
+    typeof candidate.y === "number" &&
+    typeof candidate.z === "number" &&
+    typeof candidate.w === "number"
+  );
+}
+
+function writeStoredViewState(viewState: ViewState) {
+  const orientation =
+    normalizeQuaternionState(viewState.orientation) ??
+    identityQuaternionState();
+
+  window.localStorage.setItem(
+    viewStorageKey,
+    JSON.stringify({
+      zoom: clampZoom(viewState.zoom),
+      orientation,
+    }),
+  );
 }
 
 function readStoredColor(): DrawingColor {
@@ -1495,34 +1688,98 @@ function createOverlayCubeTexture(): OverlayCubeTexture {
     return canvas;
   });
   const texture = new THREE.CubeTexture(canvases);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
   texture.needsUpdate = true;
 
   return { texture, contexts };
+}
+
+function nlerpUnitVectors(a: UnitVector, b: UnitVector, t: number): UnitVector {
+  const x = a.x + (b.x - a.x) * t;
+  const y = a.y + (b.y - a.y) * t;
+  const z = a.z + (b.z - a.z) * t;
+  const len = Math.hypot(x, y, z);
+  return { x: x / len, y: y / len, z: z / len };
+}
+
+function findSeamCrossing(
+  a: UnitVector,
+  b: UnitVector,
+  faceA: string,
+): { onA: UnitVector; onB: UnitVector } {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    const p = nlerpUnitVectors(a, b, mid);
+    if (projectUnitVectorToCubeFace(p).face === faceA) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return {
+    onA: nlerpUnitVectors(a, b, lo),
+    onB: nlerpUnitVectors(a, b, hi),
+  };
 }
 
 function paintDrawingOnOverlay(
   overlay: OverlayCubeTexture,
   drawing: Pick<Drawing, "path" | "color" | "brushSize">,
 ) {
-  const pathsByFace = new Map<string, Array<{ x: number; y: number }>>();
+  if (drawing.path.length === 0) return;
 
-  for (const point of drawing.path) {
+  const pathsByFace = new Map<string, Array<Array<{ x: number; y: number }>>>();
+
+  const getFacePaths = (face: string) => {
+    let paths = pathsByFace.get(face);
+    if (!paths) {
+      paths = [];
+      pathsByFace.set(face, paths);
+    }
+    return paths;
+  };
+
+  const toPixel = (uv: { u: number; v: number }) => ({
+    x: uv.u * overlayFaceSize,
+    y: uv.v * overlayFaceSize,
+  });
+
+  let prevPoint = drawing.path[0];
+  const firstProjection = projectUnitVectorToCubeFace(prevPoint);
+  let currentFace = firstProjection.face;
+  let currentSubPath: Array<{ x: number; y: number }> = [
+    toPixel(cubeProjectionToTextureUv(firstProjection)),
+  ];
+  getFacePaths(currentFace).push(currentSubPath);
+
+  for (let i = 1; i < drawing.path.length; i++) {
+    const point = drawing.path[i];
     const projection = projectUnitVectorToCubeFace(point);
-    const textureUv = cubeProjectionToTextureUv(projection);
-    const facePath = pathsByFace.get(projection.face) ?? [];
-    facePath.push({
-      x: textureUv.u * overlayFaceSize,
-      y: textureUv.v * overlayFaceSize,
-    });
-    pathsByFace.set(projection.face, facePath);
+    const uv = cubeProjectionToTextureUv(projection);
+
+    if (projection.face === currentFace) {
+      currentSubPath.push(toPixel(uv));
+    } else {
+      const { onA, onB } = findSeamCrossing(prevPoint, point, currentFace);
+      currentSubPath.push(toPixel(cubeProjectionToTextureUv(projectUnitVectorToCubeFace(onA))));
+      currentFace = projection.face;
+      currentSubPath = [
+        toPixel(cubeProjectionToTextureUv(projectUnitVectorToCubeFace(onB))),
+        toPixel(uv),
+      ];
+      getFacePaths(currentFace).push(currentSubPath);
+    }
+
+    prevPoint = point;
   }
 
-  for (const [faceName, path] of pathsByFace) {
+  for (const [faceName, subPaths] of pathsByFace) {
     const context = overlay.contexts[faceName];
-
-    if (!context || path.length === 0) {
-      continue;
-    }
+    if (!context) continue;
 
     context.save();
     context.strokeStyle = drawing.color;
@@ -1531,17 +1788,20 @@ function paintDrawingOnOverlay(
     context.lineCap = "round";
     context.lineJoin = "round";
 
-    if (path.length === 1) {
-      context.beginPath();
-      context.arc(path[0].x, path[0].y, context.lineWidth / 2, 0, Math.PI * 2);
-      context.fill();
-    } else {
-      context.beginPath();
-      context.moveTo(path[0].x, path[0].y);
-      for (const point of path.slice(1)) {
-        context.lineTo(point.x, point.y);
+    for (const subPath of subPaths) {
+      if (subPath.length === 0) continue;
+      if (subPath.length === 1) {
+        context.beginPath();
+        context.arc(subPath[0].x, subPath[0].y, context.lineWidth / 2, 0, Math.PI * 2);
+        context.fill();
+      } else {
+        context.beginPath();
+        context.moveTo(subPath[0].x, subPath[0].y);
+        for (let j = 1; j < subPath.length; j++) {
+          context.lineTo(subPath[j].x, subPath[j].y);
+        }
+        context.stroke();
       }
-      context.stroke();
     }
 
     context.restore();
@@ -1601,13 +1861,17 @@ function spherePointFromPointer(
   raycaster.setFromCamera(pointerNdc, camera);
   const hit = raycaster.intersectObject(sphere, false)[0];
 
-  if (!hit) {
-    return undefined;
+  if (hit) {
+    const localPoint = sphere.worldToLocal(hit.point.clone()).normalize();
+    return { x: localPoint.x, y: localPoint.y, z: localPoint.z };
   }
 
-  const localPoint = sphere.worldToLocal(hit.point.clone()).normalize();
-
-  return { x: localPoint.x, y: localPoint.y, z: localPoint.z };
+  const ox = raycaster.ray.origin.x;
+  const oy = raycaster.ray.origin.y;
+  const r = Math.hypot(ox, oy);
+  if (r < 0.0001) return undefined;
+  const silhouette = sphere.worldToLocal(new THREE.Vector3(ox / r, oy / r, 0)).normalize();
+  return { x: silhouette.x, y: silhouette.y, z: silhouette.z };
 }
 
 function spherePointFromClientPoint(
