@@ -138,7 +138,7 @@ export function createApp(config: AppConfig) {
             visitId: connection.visitId,
             connectionId: connection.connectionId,
             strokeId: clientMessage.strokeId,
-            points: clientMessage.points
+            appendedPoints: clientMessage.appendedPoints
           }, connection.connectionId);
           return;
         }

@@ -551,6 +551,53 @@ export function App() {
       updateView({ ...viewStateRef.current, zoom: clampZoom(zoom) });
     };
 
+    const syncViewTransforms = () => {
+      updateOrthographicCamera(
+        camera,
+        host.clientWidth,
+        host.clientHeight,
+        viewStateRef.current.zoom,
+      );
+      sphere.quaternion.copy(
+        quaternionStateToThree(viewStateRef.current.orientation),
+      );
+      camera.updateMatrixWorld(true);
+      sphere.updateMatrixWorld(true);
+    };
+
+    const extendActiveStrokeAtClientPoint = (clientX: number, clientY: number) => {
+      if (!pointer.active || !pointer.drawing || !activeStroke) {
+        return;
+      }
+
+      syncViewTransforms();
+      const point = spherePointFromClientPoint(
+        { x: clientX, y: clientY },
+        renderer,
+        camera,
+        sphere,
+        raycaster,
+        pointerNdc,
+      );
+      if (
+        point &&
+        shouldStorePathPoint(
+          activeStroke.path.at(-1),
+          point,
+          activeStroke.brushSize,
+        )
+      ) {
+        activeStroke.path.push(point);
+        transientStrokes.set(`local:${activeStroke.id}`, activeStroke);
+        repaintOverlay(transientOverlay, transientStrokes.values());
+        sendClientMessage({
+          type: "stroke_updated",
+          strokeId: activeStroke.id,
+          appendedPoints: [point],
+        });
+      }
+    };
+
     const onPointerDown = (event: PointerEvent) => {
       if (screensaverModeRef.current) {
         exitScreensaverMode();
@@ -586,6 +633,9 @@ export function App() {
           pointer.active = true;
           pointer.drawing = true;
           pointer.id = event.pointerId;
+          pointer.lastX = event.clientX;
+          pointer.lastY = event.clientY;
+          pointer.lastAt = performance.now();
           transientStrokes.set(`local:${strokeId}`, activeStroke);
           repaintOverlay(transientOverlay, transientStrokes.values());
           sendClientMessage({
@@ -665,31 +715,10 @@ export function App() {
           pointer.id === event.pointerId &&
           activeStroke
         ) {
-          const point = spherePointFromPointer(
-            event,
-            renderer,
-            camera,
-            sphere,
-            raycaster,
-            pointerNdc,
-          );
-          if (
-            point &&
-            shouldStorePathPoint(
-              activeStroke.path.at(-1),
-              point,
-              activeStroke.brushSize,
-            )
-          ) {
-            activeStroke.path.push(point);
-            transientStrokes.set(`local:${activeStroke.id}`, activeStroke);
-            repaintOverlay(transientOverlay, transientStrokes.values());
-            sendClientMessage({
-              type: "stroke_updated",
-              strokeId: activeStroke.id,
-              points: activeStroke.path,
-            });
-          }
+          extendActiveStrokeAtClientPoint(event.clientX, event.clientY);
+          pointer.lastX = event.clientX;
+          pointer.lastY = event.clientY;
+          pointer.lastAt = performance.now();
         }
         return;
       }
@@ -791,6 +820,7 @@ export function App() {
 
       if (screensaverModeRef.current || event.ctrlKey || event.metaKey) {
         setZoom(viewStateRef.current.zoom - event.deltaY * 0.0012);
+        extendActiveStrokeAtClientPoint(pointer.lastX, pointer.lastY);
         return;
       }
 
@@ -808,6 +838,7 @@ export function App() {
         .multiply(quaternionStateToThree(viewStateRef.current.orientation))
         .normalize();
       updateView({ ...viewStateRef.current, orientation: quaternionToState(orientation) });
+      extendActiveStrokeAtClientPoint(pointer.lastX, pointer.lastY);
 
       const isTrackpad =
         event.deltaMode === 0 &&
@@ -904,7 +935,7 @@ export function App() {
           const key = `${event.connectionId}:${event.strokeId}`;
           const existing = transientStrokes.get(key);
           if (existing) {
-            existing.path = event.points;
+            existing.path.push(...event.appendedPoints);
             repaintOverlay(transientOverlay, transientStrokes.values());
           }
         }
@@ -996,6 +1027,7 @@ export function App() {
             .multiply(quaternionStateToThree(viewStateRef.current.orientation))
             .normalize();
           updateView({ ...viewStateRef.current, orientation: quaternionToState(orientation) });
+          extendActiveStrokeAtClientPoint(pointer.lastX, pointer.lastY);
           const axisAngle = quaternionToAxisAngle(keyDelta);
           if (axisAngle.angle > 0) {
             const invOrientation = quaternionStateToThree(viewStateRef.current.orientation).invert();
@@ -1005,15 +1037,7 @@ export function App() {
         }
       }
 
-      updateOrthographicCamera(
-        camera,
-        host.clientWidth,
-        host.clientHeight,
-        viewStateRef.current.zoom,
-      );
-      sphere.quaternion.copy(
-        quaternionStateToThree(viewStateRef.current.orientation),
-      );
+      syncViewTransforms();
       renderer.render(scene, camera);
       frameId = window.requestAnimationFrame(animate);
     };

@@ -83,7 +83,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("stroke_updated"),
     strokeId: z.string().min(1),
-    points: drawingPathSchema
+    appendedPoints: drawingPathSchema
   }),
   z.object({
     type: z.literal("stroke_cancelled"),
@@ -127,7 +127,7 @@ export const serverEventSchema = z.discriminatedUnion("type", [
     visitId: z.string().min(1),
     connectionId: z.string().min(1),
     strokeId: z.string().min(1),
-    points: drawingPathSchema
+    appendedPoints: drawingPathSchema
   }),
   z.object({
     type: z.literal("stroke_cancelled"),
