@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -f ".env.deploy" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env.deploy"
+  set +a
+fi
+
 DEPLOY_HOST="${DEPLOY_HOST:-grant@basic-droplet}"
 DEPLOY_PATH="${DEPLOY_PATH:-/home/grant/sphere-paint}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"

@@ -49,6 +49,14 @@ After pushing changes to GitHub, deploy from your local checkout:
 npm run deploy
 ```
 
+For local deploy settings, copy `.env.deploy.example` to `.env.deploy` and edit it:
+
+```sh
+cp .env.deploy.example .env.deploy
+```
+
+`.env.deploy` is ignored by Git. Use it for the SSH host/IP and remote path, not for an SSH password. Prefer SSH keys and your SSH agent.
+
 The script defaults to:
 
 - `DEPLOY_HOST=grant@basic-droplet`
