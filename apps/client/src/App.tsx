@@ -432,6 +432,7 @@ export function App() {
     >();
     scene.add(sphere);
 
+    drawingsRef.current = orderDrawingsForPaint(drawingsRef.current);
     for (const drawing of drawingsRef.current) {
       paintDrawingOnOverlay(overlay, drawing);
     }
@@ -1014,9 +1015,19 @@ export function App() {
           }
           findTransientStroke(transientStrokes, event.drawing.path);
 
-          drawingsRef.current = [...drawingsRef.current, event.drawing];
-          paintDrawingOnOverlay(overlay, event.drawing);
-          overlay.texture.needsUpdate = true;
+          const { drawings, changed, needsRepaint } = mergeDrawingForPaint(
+            drawingsRef.current,
+            event.drawing,
+          );
+          if (changed) {
+            drawingsRef.current = drawings;
+            if (needsRepaint) {
+              repaintOverlay(overlay, drawingsRef.current);
+            } else {
+              paintDrawingOnOverlay(overlay, event.drawing);
+              overlay.texture.needsUpdate = true;
+            }
+          }
           repaintOverlay(transientOverlay, transientStrokes.values());
         }
 
@@ -1058,7 +1069,9 @@ export function App() {
 
         if (event.type === "snapshot_promoted") {
           const bakedIds = new Set(event.bakedDrawingIds ?? []);
-          drawingsRef.current = drawingsRef.current.filter((d) => !bakedIds.has(d.id));
+          drawingsRef.current = orderDrawingsForPaint(
+            drawingsRef.current.filter((d) => !bakedIds.has(d.id)),
+          );
           repaintOverlay(overlay, drawingsRef.current);
           overlay.texture.needsUpdate = true;
 
@@ -1957,6 +1970,31 @@ function repaintOverlay(
   }
 
   overlay.texture.needsUpdate = true;
+}
+
+function orderDrawingsForPaint(drawings: Drawing[]) {
+  return [...drawings].sort((a, b) => {
+    const revisionDelta = a.createdRevision - b.createdRevision;
+    if (revisionDelta !== 0) return revisionDelta;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function mergeDrawingForPaint(existingDrawings: Drawing[], drawing: Drawing) {
+  if (existingDrawings.some((existing) => existing.id === drawing.id)) {
+    return {
+      drawings: existingDrawings,
+      changed: false,
+      needsRepaint: false,
+    };
+  }
+
+  const drawings = orderDrawingsForPaint([...existingDrawings, drawing]);
+  return {
+    drawings,
+    changed: true,
+    needsRepaint: drawings.at(-1)?.id !== drawing.id,
+  };
 }
 
 function brushPixelWidth(brushSize: BrushSize) {
