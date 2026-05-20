@@ -63,12 +63,15 @@ The script defaults to:
 - `DEPLOY_PATH=/home/grant/sphere-paint`
 - `DEPLOY_BRANCH=main`
 - `DEPLOY_HEALTH_URL=https://sphere-paint.constraint.systems/api/health`
+- `DEPLOY_RELOAD_NGINX=0`
 
 Override them per run if needed:
 
 ```sh
 DEPLOY_HOST=grant@your-host DEPLOY_PATH=/path/to/repo npm run deploy
 ```
+
+Set `DEPLOY_RELOAD_NGINX=1` only if the deploy user can run `sudo nginx -t` and `sudo systemctl reload nginx` without a password.
 
 ## PM2
 

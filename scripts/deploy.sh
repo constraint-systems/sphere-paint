@@ -12,11 +12,12 @@ DEPLOY_HOST="${DEPLOY_HOST:-grant@basic-droplet}"
 DEPLOY_PATH="${DEPLOY_PATH:-/home/grant/sphere-paint}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 DEPLOY_HEALTH_URL="${DEPLOY_HEALTH_URL:-https://sphere-paint.constraint.systems/api/health}"
+DEPLOY_RELOAD_NGINX="${DEPLOY_RELOAD_NGINX:-0}"
 
 echo "Deploying ${DEPLOY_BRANCH} to ${DEPLOY_HOST}:${DEPLOY_PATH}"
 
 ssh "$DEPLOY_HOST" \
-  "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_BRANCH='$DEPLOY_BRANCH' bash -se" <<'EOF'
+  "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_BRANCH='$DEPLOY_BRANCH' DEPLOY_RELOAD_NGINX='$DEPLOY_RELOAD_NGINX' bash -se" <<'EOF'
 set -euo pipefail
 export PATH="$HOME/.nix-profile/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 cd "$DEPLOY_PATH"
@@ -28,8 +29,12 @@ npm run build
 npm run db:migrate
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
-sudo nginx -t
-sudo systemctl reload nginx
+if [ "$DEPLOY_RELOAD_NGINX" = "1" ]; then
+  sudo -n nginx -t
+  sudo -n systemctl reload nginx
+else
+  echo "Skipping Nginx reload. Set DEPLOY_RELOAD_NGINX=1 if passwordless sudo is configured."
+fi
 EOF
 
 curl -fsS "$DEPLOY_HEALTH_URL"
