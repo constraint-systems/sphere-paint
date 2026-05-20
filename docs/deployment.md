@@ -62,7 +62,6 @@ The script defaults to:
 - `DEPLOY_HOST=grant@basic-droplet`
 - `DEPLOY_PATH=/home/grant/sphere-paint`
 - `DEPLOY_BRANCH=main`
-- `DEPLOY_HEALTH_URL=https://sphere-paint.constraint.systems/api/health`
 - `DEPLOY_RELOAD_NGINX=0`
 
 Override them per run if needed:

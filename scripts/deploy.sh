@@ -11,7 +11,6 @@ fi
 DEPLOY_HOST="${DEPLOY_HOST:-grant@basic-droplet}"
 DEPLOY_PATH="${DEPLOY_PATH:-/home/grant/sphere-paint}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
-DEPLOY_HEALTH_URL="${DEPLOY_HEALTH_URL:-https://sphere-paint.constraint.systems/api/health}"
 DEPLOY_RELOAD_NGINX="${DEPLOY_RELOAD_NGINX:-0}"
 
 echo "Deploying ${DEPLOY_BRANCH} to ${DEPLOY_HOST}:${DEPLOY_PATH}"
@@ -37,6 +36,4 @@ else
 fi
 EOF
 
-curl -fsS "$DEPLOY_HEALTH_URL"
-echo
 echo "Deploy complete"
