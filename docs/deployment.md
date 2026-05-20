@@ -41,6 +41,27 @@ npm run build
 npm run db:migrate
 ```
 
+## Deploy From Local
+
+After pushing changes to GitHub, deploy from your local checkout:
+
+```sh
+npm run deploy
+```
+
+The script defaults to:
+
+- `DEPLOY_HOST=grant@basic-droplet`
+- `DEPLOY_PATH=/home/grant/sphere-paint`
+- `DEPLOY_BRANCH=main`
+- `DEPLOY_HEALTH_URL=https://sphere-paint.constraint.systems/api/health`
+
+Override them per run if needed:
+
+```sh
+DEPLOY_HOST=grant@your-host DEPLOY_PATH=/path/to/repo npm run deploy
+```
+
 ## PM2
 
 The PM2 config uses the directory containing `ecosystem.config.cjs` as its working directory.

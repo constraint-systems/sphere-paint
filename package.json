@@ -14,6 +14,7 @@
     "dev:client": "npm run dev -w @globe2/client",
     "dev:server": "node --env-file=.env ./node_modules/.bin/tsx watch apps/server/src/server.ts",
     "dev:worker": "npm run dev:worker -w @globe2/server",
+    "deploy": "bash scripts/deploy.sh",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate --config apps/server/drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config apps/server/drizzle.config.ts"
