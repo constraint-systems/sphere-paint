@@ -55,6 +55,7 @@ const startInertiaVelocity = 0.0022;
 const wheelRotateSpeed = 0.0015;
 const keyboardRotateSpeed = 0.006;
 const keyboardZoomStep = 0.15;
+const strokeUpdateBatchDelay = 40;
 const trackpadPixelThreshold = 40;
 const viewStorageDelay = 250;
 const overlayFaceSize = 1024;
@@ -486,6 +487,9 @@ export function App() {
     const touches = new Map<number, { x: number; y: number }>();
     let lastPinchDistance: number | undefined;
     let pendingMultiTouchRotation = false;
+    let pendingStrokeUpdate:
+      | { strokeId: string; points: UnitVector[]; timeout: number | undefined }
+      | undefined;
     let frameId = 0;
     let viewStorageTimeout: number | undefined;
 
@@ -551,6 +555,60 @@ export function App() {
       updateView({ ...viewStateRef.current, zoom: clampZoom(zoom) });
     };
 
+    const flushPendingStrokeUpdate = () => {
+      if (!pendingStrokeUpdate) {
+        return;
+      }
+
+      if (pendingStrokeUpdate.timeout !== undefined) {
+        window.clearTimeout(pendingStrokeUpdate.timeout);
+        pendingStrokeUpdate.timeout = undefined;
+      }
+
+      if (pendingStrokeUpdate.points.length > 0) {
+        sendClientMessage({
+          type: "stroke_updated",
+          strokeId: pendingStrokeUpdate.strokeId,
+          appendedPoints: pendingStrokeUpdate.points,
+        });
+      }
+
+      pendingStrokeUpdate = undefined;
+    };
+
+    const discardPendingStrokeUpdate = (strokeId: string) => {
+      if (!pendingStrokeUpdate || pendingStrokeUpdate.strokeId !== strokeId) {
+        return;
+      }
+
+      if (pendingStrokeUpdate.timeout !== undefined) {
+        window.clearTimeout(pendingStrokeUpdate.timeout);
+      }
+      pendingStrokeUpdate = undefined;
+    };
+
+    const queueStrokeUpdate = (strokeId: string, point: UnitVector) => {
+      if (pendingStrokeUpdate && pendingStrokeUpdate.strokeId !== strokeId) {
+        flushPendingStrokeUpdate();
+      }
+
+      if (!pendingStrokeUpdate) {
+        pendingStrokeUpdate = {
+          strokeId,
+          points: [],
+          timeout: undefined,
+        };
+      }
+
+      pendingStrokeUpdate.points.push(point);
+      if (pendingStrokeUpdate.timeout === undefined) {
+        pendingStrokeUpdate.timeout = window.setTimeout(
+          flushPendingStrokeUpdate,
+          strokeUpdateBatchDelay,
+        );
+      }
+    };
+
     const syncViewTransforms = () => {
       updateOrthographicCamera(
         camera,
@@ -590,11 +648,7 @@ export function App() {
         activeStroke.path.push(point);
         transientStrokes.set(`local:${activeStroke.id}`, activeStroke);
         repaintOverlay(transientOverlay, transientStrokes.values());
-        sendClientMessage({
-          type: "stroke_updated",
-          strokeId: activeStroke.id,
-          appendedPoints: [point],
-        });
+        queueStrokeUpdate(activeStroke.id, point);
       }
     };
 
@@ -675,6 +729,7 @@ export function App() {
       if (activeStroke) {
         transientStrokes.delete(`local:${activeStroke.id}`);
         repaintOverlay(transientOverlay, transientStrokes.values());
+        discardPendingStrokeUpdate(activeStroke.id);
         sendClientMessage({
           type: "stroke_cancelled",
           strokeId: activeStroke.id,
@@ -763,6 +818,7 @@ export function App() {
       ) {
         const wasRotating = pointer.rotating;
         if (pointer.drawing && activeStroke) {
+          flushPendingStrokeUpdate();
           let keepPendingStroke = false;
           if (
             activeStroke.path.length > 0 &&
@@ -782,6 +838,7 @@ export function App() {
               brushSize: activeStroke.brushSize,
             });
           } else {
+            discardPendingStrokeUpdate(activeStroke.id);
             sendClientMessage({
               type: "stroke_cancelled",
               strokeId: activeStroke.id,
@@ -1079,6 +1136,7 @@ export function App() {
 
     return () => {
       flushStoredView();
+      flushPendingStrokeUpdate();
       window.cancelAnimationFrame(frameId);
       window.removeEventListener("keydown", onRotationKeyDown);
       window.removeEventListener("keyup", onRotationKeyUp);
