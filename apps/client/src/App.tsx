@@ -1069,12 +1069,6 @@ export function App() {
 
         if (event.type === "snapshot_promoted") {
           const bakedIds = new Set(event.bakedDrawingIds ?? []);
-          drawingsRef.current = orderDrawingsForPaint(
-            drawingsRef.current.filter((d) => !bakedIds.has(d.id)),
-          );
-          repaintOverlay(overlay, drawingsRef.current);
-          overlay.texture.needsUpdate = true;
-
           const faceUrls = cubeFaceNames.map((face) => event.faces[face]?.url ?? "");
           if (faceUrls.every(Boolean)) {
             const textureLoader = new THREE.CubeTextureLoader();
@@ -1082,6 +1076,10 @@ export function App() {
               texture.colorSpace = THREE.SRGBColorSpace;
               material.uniforms.cubeMap.value = texture;
               material.needsUpdate = true;
+              drawingsRef.current = orderDrawingsForPaint(
+                drawingsRef.current.filter((d) => !bakedIds.has(d.id)),
+              );
+              repaintOverlay(overlay, drawingsRef.current);
             });
           }
         }
