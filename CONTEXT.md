@@ -54,7 +54,7 @@ The fixed set of colors available for Drawings.
 One of the fixed stroke widths available for Drawings.
 
 ### In-Progress Stroke
-A live stroke segment visible to other connected Users before it is committed as a persistent Drawing. An In-Progress Stroke is not part of the World's durable state.
+A live stroke segment visible to other connected Users before it is committed as a persistent Drawing. An In-Progress Stroke is not part of the World's durable state; long drawing gestures may commit completed segments while the current tail remains in progress.
 
 ### Snapshot
 An irreversible bake of existing Drawings into the Sphere's background image. A Snapshot preserves the World visually while reducing the amount of live Drawing state clients need to load.

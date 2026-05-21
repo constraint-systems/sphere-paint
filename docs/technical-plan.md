@@ -103,7 +103,7 @@ One Visit Identity may have multiple simultaneous connections. Treat them as one
 
 In-Progress Strokes are ephemeral WebSocket events keyed by connection plus client-generated stroke id. They are not stored in Postgres. Clear active In-Progress Strokes when their connection disconnects.
 
-Committed Drawings become durable only after server confirmation. Clients may render their own In-Progress Stroke immediately; after commit, replace it with the server-confirmed Drawing.
+Committed Drawings become durable only after server confirmation. Clients may render their own In-Progress Stroke immediately; after commit, replace it with the server-confirmed Drawing. Long drawing gestures may be committed as multiple ordinary Drawing segments while the gesture continues, with each new in-progress tail starting from the previous segment's final point.
 
 Bootstrap returns:
 
@@ -151,7 +151,7 @@ Admin force-snapshot can promote a new Snapshot for operational recovery or migr
 
 Use the same shared Zod schemas for revision-bearing events whether they are delivered through bootstrap catch-up or live WebSocket. Server errors use structured codes such as `invalid_visit`, `validation_failed`, `rate_limited`, `stale_revision`, and `server_error`.
 
-The client reconnects automatically with backoff using the same Visit Identity and last seen revision. If catch-up succeeds, continue. If `lastSeenRevision` is older than retained `world_events`, the server responds with `stale_revision` and the client re-bootstraps. If the Visit expired, the client starts a new Visit. Do not preserve or replay unsent In-Progress Strokes across reconnect in v1.
+The client reconnects automatically with backoff using the same Visit Identity and last seen revision. If catch-up succeeds, continue. If `lastSeenRevision` is older than retained `world_events`, the server responds with `stale_revision` and the client re-bootstraps. If the Visit expired, the client starts a new Visit. Do not preserve or replay unsent In-Progress Strokes across reconnect in v1. Completed segments of a long gesture that have already been accepted by the server remain durable; only the unconfirmed tail is lost.
 
 Show a minimal connection status indicator for connecting, reconnecting, and offline. During reconnect/offline states, disable committing new Drawings and show drawing controls as unavailable.
 

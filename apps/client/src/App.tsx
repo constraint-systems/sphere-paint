@@ -47,6 +47,7 @@ const revisionStorageKey = "globe2.lastSeenRevision";
 const colorStorageKey = "globe2.color";
 const brushStorageKey = "globe2.brushSize";
 const viewStorageKey = "globe2.viewState";
+const localPendingStrokesRejectedEvent = "globe2:local-pending-strokes-rejected";
 const autoRotateSpeed = -0.4;
 const autoRotateSecondarySpeed = 0.1;
 const inertiaDamping = 0.95;
@@ -56,6 +57,7 @@ const wheelRotateSpeed = 0.0015;
 const keyboardRotateSpeed = 0.006;
 const keyboardZoomStep = 0.15;
 const strokeUpdateBatchDelay = 40;
+const partialStrokeCommitPointCount = 96;
 const trackpadPixelThreshold = 40;
 const viewStorageDelay = 250;
 const overlayFaceSize = 1024;
@@ -95,6 +97,7 @@ export function App() {
   );
   const [aboutOpen, setAboutOpen] = useState(false);
   const [drawingLocked, setDrawingLocked] = useState(false);
+  const [sphereContentReady, setSphereContentReady] = useState(false);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const viewStateRef = useRef(viewState);
   const flushStoredViewRef = useRef<() => void>(() => undefined);
@@ -106,6 +109,7 @@ export function App() {
   const connectionStateRef = useRef(connectionState);
   const screensaverModeRef = useRef(screensaverMode);
   const drawingLockedRef = useRef(drawingLocked);
+  const sphereContentReadyRef = useRef(sphereContentReady);
   const drawingsRef = useRef<Drawing[]>([]);
   const eventQueueRef = useRef<
     Array<
@@ -123,7 +127,9 @@ export function App() {
     >
   >([]);
 
-  const drawingMode = !screensaverMode && isDrawingZoom(viewState.zoom);
+  const interactionReady = bootstrap.status === "ready" && sphereContentReady;
+  const drawingMode =
+    interactionReady && !screensaverMode && isDrawingZoom(viewState.zoom);
   const zoomProgress =
     ((viewState.zoom - viewSettings.minZoom) /
       (viewSettings.maxZoom - viewSettings.minZoom)) *
@@ -145,6 +151,8 @@ export function App() {
       ? { tone: "error" as const, message: bootstrap.message }
       : bootstrap.status === "loading"
         ? { tone: "loading" as const, message: "Loading" }
+        : !sphereContentReady
+          ? { tone: "loading" as const, message: "Loading" }
         : connectionState === "connecting"
           ? { tone: "loading" as const, message: "Connecting" }
           : connectionState === "offline"
@@ -170,6 +178,10 @@ export function App() {
   useEffect(() => {
     drawingLockedRef.current = drawingLocked;
   }, [drawingLocked]);
+
+  useEffect(() => {
+    sphereContentReadyRef.current = sphereContentReady;
+  }, [sphereContentReady]);
 
   useEffect(() => {
     if (!drawingMode && drawingLocked) {
@@ -335,6 +347,7 @@ export function App() {
 
         setConnectionState("offline");
         socketRef.current = undefined;
+        window.dispatchEvent(new Event(localPendingStrokesRejectedEvent));
         const delay = Math.min(5000, 250 * 2 ** reconnectAttempt);
         reconnectAttempt += 1;
         reconnectTimeout = window.setTimeout(connect, delay);
@@ -373,6 +386,9 @@ export function App() {
       return;
     }
 
+    setSphereContentReady(false);
+    sphereContentReadyRef.current = false;
+    let disposed = false;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(host.clientWidth, host.clientHeight);
@@ -383,6 +399,7 @@ export function App() {
     camera.position.set(0, 0, 4);
     camera.lookAt(0, 0, 0);
     const geometry = new THREE.SphereGeometry(1, 96, 64);
+    const wireframeGeometry = new THREE.SphereGeometry(1, 32, 16);
     const fallbackTexture = createFallbackCubeTexture();
     const overlay = createOverlayCubeTexture();
     const transientOverlay = createOverlayCubeTexture();
@@ -421,7 +438,15 @@ export function App() {
         }
       `,
     });
+    const wireframeMaterial = new THREE.MeshBasicMaterial({
+      color: 0x444444,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.48,
+    });
     const sphere = new THREE.Mesh(geometry, material);
+    const wireframeSphere = new THREE.Mesh(wireframeGeometry, wireframeMaterial);
+    sphere.visible = false;
     const transientStrokes = new Map<
       string,
       Pick<Drawing, "path" | "color" | "brushSize">
@@ -431,12 +456,24 @@ export function App() {
       Pick<Drawing, "path" | "color" | "brushSize">
     >();
     scene.add(sphere);
+    scene.add(wireframeSphere);
 
     drawingsRef.current = orderDrawingsForPaint(drawingsRef.current);
     for (const drawing of drawingsRef.current) {
       paintDrawingOnOverlay(overlay, drawing);
     }
     overlay.texture.needsUpdate = true;
+
+    const revealPaintedSphere = () => {
+      if (disposed) {
+        return;
+      }
+
+      sphere.visible = true;
+      wireframeSphere.visible = false;
+      sphereContentReadyRef.current = true;
+      setSphereContentReady(true);
+    };
 
     const faceUrls = cubeFaceNames.map(
       (faceName) => bootstrap.snapshotFaces[faceName]?.url,
@@ -446,13 +483,20 @@ export function App() {
       textureLoader.load(
         faceUrls,
         (texture: THREE.CubeTexture) => {
+          if (disposed) {
+            texture.dispose();
+            return;
+          }
           texture.colorSpace = THREE.SRGBColorSpace;
           material.uniforms.cubeMap.value = texture;
           material.needsUpdate = true;
+          revealPaintedSphere();
         },
         undefined,
-        () => undefined,
+        revealPaintedSphere,
       );
+    } else {
+      revealPaintedSphere();
     }
 
     const inertiaVelocity = {
@@ -599,7 +643,7 @@ export function App() {
         sendClientMessage({
           type: "stroke_updated",
           strokeId: pendingStrokeUpdate.strokeId,
-          appendedPoints: pendingStrokeUpdate.points,
+          appendedPoints: [...pendingStrokeUpdate.points],
         });
       }
 
@@ -639,6 +683,92 @@ export function App() {
       }
     };
 
+    const commitActiveStrokeSegment = (finishStroke: boolean) => {
+      if (!activeStroke) {
+        return false;
+      }
+
+      flushPendingStrokeUpdate();
+
+      if (
+        activeStroke.path.length < 2 ||
+        connectionStateRef.current !== "connected"
+      ) {
+        discardPendingStrokeUpdate(activeStroke.id);
+        sendClientMessage({
+          type: "stroke_cancelled",
+          strokeId: activeStroke.id,
+        });
+        transientStrokes.delete(`local:${activeStroke.id}`);
+        repaintOverlay(transientOverlay, transientStrokes.values());
+        return false;
+      }
+
+      const committedStroke = activeStroke;
+      const committedPath = [...committedStroke.path];
+      const lastPoint = committedPath[committedPath.length - 1];
+
+      sendClientMessage({
+        type: "drawing_commit_requested",
+        strokeId: committedStroke.id,
+        path: committedPath,
+        color: committedStroke.color,
+        brushSize: committedStroke.brushSize,
+      });
+      pendingLocalStrokes.set(committedStroke.id, {
+        path: committedPath,
+        color: committedStroke.color,
+        brushSize: committedStroke.brushSize,
+      });
+
+      if (finishStroke) {
+        return true;
+      }
+
+      sendClientMessage({
+        type: "stroke_cancelled",
+        strokeId: committedStroke.id,
+      });
+
+      const nextStroke = {
+        id: createClientId(),
+        path: [lastPoint],
+        color: committedStroke.color,
+        brushSize: committedStroke.brushSize,
+      };
+      activeStroke = nextStroke;
+      transientStrokes.set(`local:${nextStroke.id}`, nextStroke);
+      sendClientMessage({
+        type: "stroke_started",
+        strokeId: nextStroke.id,
+        point: lastPoint,
+        color: nextStroke.color,
+        brushSize: nextStroke.brushSize,
+      });
+      repaintOverlay(transientOverlay, transientStrokes.values());
+
+      return true;
+    };
+
+    const clearPendingLocalStrokes = () => {
+      const activeStrokeId = activeStroke?.id;
+      if (pendingLocalStrokes.size === 0 && !activeStrokeId) {
+        return;
+      }
+
+      for (const strokeId of pendingLocalStrokes.keys()) {
+        transientStrokes.delete(`local:${strokeId}`);
+        discardPendingStrokeUpdate(strokeId);
+      }
+      pendingLocalStrokes.clear();
+      if (activeStrokeId) {
+        transientStrokes.delete(`local:${activeStrokeId}`);
+        discardPendingStrokeUpdate(activeStrokeId);
+        activeStroke = undefined;
+      }
+      repaintOverlay(transientOverlay, transientStrokes.values());
+    };
+
     const syncViewTransforms = () => {
       updateOrthographicCamera(
         camera,
@@ -649,8 +779,10 @@ export function App() {
       sphere.quaternion.copy(
         quaternionStateToThree(viewStateRef.current.orientation),
       );
+      wireframeSphere.quaternion.copy(sphere.quaternion);
       camera.updateMatrixWorld(true);
       sphere.updateMatrixWorld(true);
+      wireframeSphere.updateMatrixWorld(true);
     };
 
     const extendActiveStrokeAtClientPoint = (clientX: number, clientY: number) => {
@@ -679,12 +811,19 @@ export function App() {
         transientStrokes.set(`local:${activeStroke.id}`, activeStroke);
         repaintOverlay(transientOverlay, transientStrokes.values());
         queueStrokeUpdate(activeStroke.id, point);
+        if (activeStroke.path.length >= partialStrokeCommitPointCount) {
+          commitActiveStrokeSegment(false);
+        }
       }
     };
 
     const onPointerDown = (event: PointerEvent) => {
       if (screensaverModeRef.current) {
         exitScreensaverMode();
+        return;
+      }
+
+      if (!sphereContentReadyRef.current) {
         return;
       }
 
@@ -852,32 +991,7 @@ export function App() {
       ) {
         const wasRotating = pointer.rotating;
         if (pointer.drawing && activeStroke) {
-          flushPendingStrokeUpdate();
-          let keepPendingStroke = false;
-          if (
-            activeStroke.path.length > 0 &&
-            connectionStateRef.current === "connected"
-          ) {
-            sendClientMessage({
-              type: "drawing_commit_requested",
-              strokeId: activeStroke.id,
-              path: activeStroke.path,
-              color: activeStroke.color,
-              brushSize: activeStroke.brushSize,
-            });
-            keepPendingStroke = true;
-            pendingLocalStrokes.set(activeStroke.id, {
-              path: [...activeStroke.path],
-              color: activeStroke.color,
-              brushSize: activeStroke.brushSize,
-            });
-          } else {
-            discardPendingStrokeUpdate(activeStroke.id);
-            sendClientMessage({
-              type: "stroke_cancelled",
-              strokeId: activeStroke.id,
-            });
-          }
+          const keepPendingStroke = commitActiveStrokeSegment(true);
 
           if (!keepPendingStroke) {
             transientStrokes.delete(`local:${activeStroke.id}`);
@@ -1006,10 +1120,12 @@ export function App() {
 
       for (const event of eventQueueRef.current.splice(0)) {
         if (event.type === "drawing_committed") {
-          const pendingEntry = findPendingStroke(
-            pendingLocalStrokes,
-            event.drawing.path,
-          );
+          const pendingEntry = event.strokeId
+            ? findPendingStrokeById(pendingLocalStrokes, event.strokeId)
+            : findPendingStroke(
+                pendingLocalStrokes,
+                event.drawing.path,
+              );
           if (pendingEntry) {
             transientStrokes.delete(`local:${pendingEntry.strokeId}`);
           }
@@ -1183,18 +1299,21 @@ export function App() {
     window.addEventListener("keyup", onRotationKeyUp);
     window.addEventListener("resize", onResize);
     window.visualViewport?.addEventListener("resize", onResize);
+    window.addEventListener(localPendingStrokesRejectedEvent, clearPendingLocalStrokes);
     onResize();
     previousFrameAt = performance.now();
     animate();
 
     return () => {
       flushStoredView();
+      disposed = true;
       flushPendingStrokeUpdate();
       window.cancelAnimationFrame(frameId);
       window.removeEventListener("keydown", onRotationKeyDown);
       window.removeEventListener("keyup", onRotationKeyUp);
       window.removeEventListener("resize", onResize);
       window.visualViewport?.removeEventListener("resize", onResize);
+      window.removeEventListener(localPendingStrokesRejectedEvent, clearPendingLocalStrokes);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
@@ -1202,7 +1321,9 @@ export function App() {
       renderer.domElement.removeEventListener("wheel", onWheel);
       host.removeChild(renderer.domElement);
       geometry.dispose();
+      wireframeGeometry.dispose();
       material.dispose();
+      wireframeMaterial.dispose();
       pendingLocalStrokes.clear();
       transientOverlay.texture.dispose();
       overlay.texture.dispose();
@@ -1452,7 +1573,7 @@ export function App() {
                   : null
                 : connectionState === "offline"
                   ? "0"
-                  : null}
+                  : "…"}
               <span className="sr-only">
                 {connectionState === "connected"
                   ? `${bootstrap.status === "ready" ? bootstrap.presenceCount : 0} present`
@@ -2083,6 +2204,19 @@ function findPendingStroke(
   }
 
   return undefined;
+}
+
+function findPendingStrokeById(
+  pendingStrokes: Map<string, Pick<Drawing, "path" | "color" | "brushSize">>,
+  strokeId: string,
+) {
+  const pendingStroke = pendingStrokes.get(strokeId);
+  if (!pendingStroke) {
+    return undefined;
+  }
+
+  pendingStrokes.delete(strokeId);
+  return { strokeId, pendingStroke };
 }
 
 function findTransientStroke(

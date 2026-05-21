@@ -161,7 +161,7 @@ export function createApp(config: AppConfig) {
               color: clientMessage.color,
               brushSize: clientMessage.brushSize
             })
-            .then((event) => broadcast(event))
+            .then((event) => broadcast({ ...event, strokeId: clientMessage.strokeId }))
             .catch((error: unknown) => {
               app.log.error(error);
               socket.send(JSON.stringify({ type: "error", code: "validation_failed" } satisfies ServerEvent));

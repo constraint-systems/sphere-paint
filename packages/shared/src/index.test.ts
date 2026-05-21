@@ -91,6 +91,26 @@ describe("shared contracts", () => {
     });
   });
 
+  it("allows drawing commit confirmations to identify the originating stroke", () => {
+    const event = serverEventSchema.parse({
+      type: "drawing_committed",
+      revision: 1,
+      strokeId: "stroke-1",
+      drawing: {
+        id: "drawing-1",
+        worldId: "world-1",
+        visitId: "visit-1",
+        path: [{ x: 1, y: 0, z: 0 }],
+        color: "#111111",
+        brushSize: "fine",
+        createdRevision: 1,
+        createdAt: "2026-05-21T00:00:00.000Z"
+      }
+    });
+
+    expect(event).toMatchObject({ type: "drawing_committed", strokeId: "stroke-1" });
+  });
+
   it("keeps committed drawings permanent by omitting undo protocol messages", () => {
     expect(clientMessageSchema.safeParse({ type: "undo_requested" }).success).toBe(false);
     expect(

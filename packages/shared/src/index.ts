@@ -138,6 +138,7 @@ export const serverEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("drawing_committed"),
     revision: z.number().int().positive(),
+    strokeId: z.string().min(1).optional(),
     drawing: drawingSchema
   }),
   z.object({
