@@ -58,6 +58,7 @@ const keyboardRotateSpeed = 0.006;
 const keyboardZoomStep = 0.15;
 const strokeUpdateBatchDelay = 40;
 const partialStrokeCommitPointCount = 96;
+const connectionOverlayDelay = 2200;
 const trackpadPixelThreshold = 40;
 const viewStorageDelay = 250;
 const overlayFaceSize = 1024;
@@ -98,6 +99,10 @@ export function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [drawingLocked, setDrawingLocked] = useState(false);
   const [sphereContentReady, setSphereContentReady] = useState(false);
+  const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
+  const [connectionDisruptionNotice, setConnectionDisruptionNotice] = useState<
+    { tone: "error"; message: string } | undefined
+  >(undefined);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const viewStateRef = useRef(viewState);
   const flushStoredViewRef = useRef<() => void>(() => undefined);
@@ -153,6 +158,10 @@ export function App() {
         ? { tone: "loading" as const, message: "Loading" }
         : !sphereContentReady
           ? { tone: "loading" as const, message: "Loading" }
+        : connectionDisruptionNotice
+          ? connectionDisruptionNotice
+        : !showConnectionOverlay
+          ? undefined
         : connectionState === "connecting"
           ? { tone: "loading" as const, message: "Connecting" }
           : connectionState === "offline"
@@ -169,6 +178,21 @@ export function App() {
 
   useEffect(() => {
     connectionStateRef.current = connectionState;
+  }, [connectionState]);
+
+  useEffect(() => {
+    if (connectionState === "connected") {
+      setShowConnectionOverlay(false);
+      setConnectionDisruptionNotice(undefined);
+      return;
+    }
+
+    const timeout = window.setTimeout(
+      () => setShowConnectionOverlay(true),
+      connectionOverlayDelay,
+    );
+
+    return () => window.clearTimeout(timeout);
   }, [connectionState]);
 
   useEffect(() => {
@@ -767,6 +791,10 @@ export function App() {
         activeStroke = undefined;
       }
       repaintOverlay(transientOverlay, transientStrokes.values());
+      setConnectionDisruptionNotice({
+        tone: "error",
+        message: "Connection lost. Current stroke was not saved.",
+      });
     };
 
     const syncViewTransforms = () => {
