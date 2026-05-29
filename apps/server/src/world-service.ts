@@ -47,6 +47,15 @@ export type BootstrapPayload = {
   revision: number;
 };
 
+export type TimelapseSnapshot = {
+  id: string;
+  faces: SnapshotFaces;
+  sourceFromRevision: number;
+  sourceToRevision: number;
+  promotedRevision: number;
+  promotedAt: string | null;
+};
+
 const defaultWorldId = "00000000-0000-4000-8000-000000000001";
 const initialSnapshotId = "00000000-0000-4000-8000-000000000101";
 
@@ -165,6 +174,31 @@ export class WorldService {
       serverTime: new Date().toISOString(),
       revision: world.currentRevision
     };
+  }
+
+  async listPromotedSnapshots(): Promise<TimelapseSnapshot[]> {
+    const worldId = await this.ensureDefaultWorld();
+    const rows = await this.db
+      .select({
+        id: snapshots.id,
+        faceUrls: snapshots.faceUrls,
+        sourceFromRevision: snapshots.sourceFromRevision,
+        sourceToRevision: snapshots.sourceToRevision,
+        promotedRevision: snapshots.promotedRevision,
+        promotedAt: snapshots.promotedAt
+      })
+      .from(snapshots)
+      .where(and(eq(snapshots.worldId, worldId), eq(snapshots.status, "promoted")))
+      .orderBy(asc(snapshots.promotedRevision), asc(snapshots.createdAt));
+
+    return rows.map((snapshot) => ({
+      id: snapshot.id,
+      faces: snapshotFacesSchema.parse(snapshot.faceUrls),
+      sourceFromRevision: snapshot.sourceFromRevision,
+      sourceToRevision: snapshot.sourceToRevision,
+      promotedRevision: snapshot.promotedRevision ?? 0,
+      promotedAt: snapshot.promotedAt?.toISOString() ?? null
+    }));
   }
 
   async ensureVisit(worldId: string, visitId: string | undefined) {

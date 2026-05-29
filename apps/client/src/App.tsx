@@ -18,6 +18,8 @@ import {
   type UnitVector,
 } from "@globe2/shared";
 import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
   CircleIcon,
   KeyIcon,
   LockIcon,
@@ -78,6 +80,14 @@ type ViewState = {
 };
 
 export function App() {
+  if (readViewModeFromUrl() === "timelapse") {
+    return <TimelapseApp />;
+  }
+
+  return <PaintApp />;
+}
+
+function PaintApp() {
   const [bootstrap, setBootstrap] = useState<BootstrapState>({
     status: "loading",
   });
@@ -1733,6 +1743,363 @@ A <a className="underline text-neutral-200" href="https://constraint.systems/" t
       ) : null}
     </main>
   );
+}
+
+type TimelapseSnapshot = {
+  id: string;
+  faces: SnapshotFaces;
+  sourceFromRevision: number;
+  sourceToRevision: number;
+  promotedRevision: number;
+  promotedAt: string | null;
+};
+
+type TimelapseState =
+  | { status: "loading" }
+  | { status: "ready"; snapshots: TimelapseSnapshot[] }
+  | { status: "error"; message: string };
+
+function TimelapseApp() {
+  const [state, setState] = useState<TimelapseState>({ status: "loading" });
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [viewState, setViewState] = useState<ViewState>(() => ({
+    zoom: viewSettings.initialZoom,
+    orientation: identityQuaternionState(),
+  }));
+  const currentSnapshot =
+    state.status === "ready" ? state.snapshots[currentIndex] : undefined;
+  const snapshotCount = state.status === "ready" ? state.snapshots.length : 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/snapshots")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Could not load snapshots");
+        return response.json() as Promise<{ snapshots: TimelapseSnapshot[] }>;
+      })
+      .then((payload) => {
+        if (cancelled) return;
+        setState({ status: "ready", snapshots: payload.snapshots });
+        setCurrentIndex(0);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setState({
+          status: "error",
+          message: error instanceof Error ? error.message : "Could not load snapshots",
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const moveSnapshot = (direction: -1 | 1) => {
+    if (snapshotCount === 0) return;
+    setCurrentIndex((index) =>
+      Math.min(snapshotCount - 1, Math.max(0, index + direction)),
+    );
+  };
+
+  const statusOverlay =
+    state.status === "loading"
+      ? { tone: "loading" as const, message: "Loading" }
+      : state.status === "error"
+        ? { tone: "error" as const, message: state.message }
+        : snapshotCount === 0
+          ? { tone: "error" as const, message: "No snapshots yet" }
+          : undefined;
+
+  return (
+    <main className="relative h-dvh min-h-dvh w-screen overflow-hidden bg-neutral-900 text-neutral-950">
+      <section
+        className="fixed inset-0 grid h-dvh min-h-dvh min-w-0 place-items-center bg-neutral-900"
+        aria-label="Snapshot timelapse sphere"
+      >
+        {currentSnapshot ? (
+          <TimelapseSphere
+            faces={currentSnapshot.faces}
+            viewState={viewState}
+            onViewStateChange={setViewState}
+          />
+        ) : null}
+      </section>
+
+      {statusOverlay ? (
+        <div className="pointer-events-none fixed inset-0 z-8 grid place-items-center px-6" aria-live="polite">
+          <div
+            className={`max-w-sm bg-neutral-400 px-6 py-4 text-center shadow-2xl ${
+              statusOverlay.tone === "loading" ? "animate-pulse" : "text-red-800"
+            }`}
+            role={statusOverlay.tone === "error" ? "alert" : "status"}
+          >
+            {statusOverlay.message}
+          </div>
+        </div>
+      ) : null}
+
+      <header className="pointer-events-none fixed inset-x-0 top-0 z-5 flex">
+        <a className="pointer-events-auto grid h-12 place-items-center bg-neutral-400 px-4 text-neutral-950" href="/">
+          Sphere Paint
+        </a>
+        <div className="grow" />
+        <div className="pointer-events-auto grid h-12 place-items-center bg-neutral-400 px-4 text-neutral-950">
+          Timelapse
+        </div>
+      </header>
+
+      {state.status === "ready" && snapshotCount > 0 ? (
+        <aside className="pointer-events-none fixed inset-x-0 bottom-0 z-5 flex items-end justify-center" aria-label="Timelapse controls">
+          <div className="pointer-events-auto flex min-h-12 w-full max-w-3xl bg-neutral-400 text-neutral-950">
+            <button
+              type="button"
+              className="grid h-12 w-12 shrink-0 cursor-pointer place-items-center disabled:cursor-default disabled:opacity-45"
+              aria-label="Previous snapshot"
+              disabled={currentIndex === 0}
+              onClick={() => moveSnapshot(-1)}
+            >
+              <ChevronLeftIcon className="size-4" aria-hidden="true" />
+            </button>
+            <label className="grid h-12 min-w-0 grow content-center px-3">
+              <span className="sr-only">Snapshot</span>
+              <input
+                className="h-8 w-full cursor-pointer accent-neutral-950"
+                type="range"
+                min={0}
+                max={Math.max(0, snapshotCount - 1)}
+                step={1}
+                value={currentIndex}
+                onChange={(event) => setCurrentIndex(Number(event.target.value))}
+              />
+            </label>
+            <button
+              type="button"
+              className="grid h-12 w-12 shrink-0 cursor-pointer place-items-center disabled:cursor-default disabled:opacity-45"
+              aria-label="Next snapshot"
+              disabled={currentIndex >= snapshotCount - 1}
+              onClick={() => moveSnapshot(1)}
+            >
+              <ChevronRightIcon className="size-4" aria-hidden="true" />
+            </button>
+            <div className="grid h-12 min-w-28 shrink-0 place-items-center px-4 tabular-nums">
+              {currentIndex + 1}/{snapshotCount}
+            </div>
+          </div>
+        </aside>
+      ) : null}
+    </main>
+  );
+}
+
+function TimelapseSphere({
+  faces,
+  viewState,
+  onViewStateChange,
+}: {
+  faces: SnapshotFaces;
+  viewState: ViewState;
+  onViewStateChange: (viewState: ViewState) => void;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewStateRef = useRef(viewState);
+
+  useEffect(() => {
+    viewStateRef.current = viewState;
+  }, [viewState]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    let disposed = false;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(host.clientWidth, host.clientHeight);
+    host.append(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+    camera.position.set(0, 0, 4);
+    camera.lookAt(0, 0, 0);
+    const geometry = new THREE.SphereGeometry(1, 96, 64);
+    const fallbackTexture = createFallbackCubeTexture();
+    const material = new THREE.ShaderMaterial({
+      uniforms: { cubeMap: { value: fallbackTexture } },
+      vertexShader: `
+        varying vec3 vLocalNormal;
+        varying vec3 vViewNormal;
+        void main() {
+          vLocalNormal = normalize(normal);
+          vViewNormal = normalize(normalMatrix * normal);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform samplerCube cubeMap;
+        varying vec3 vLocalNormal;
+        varying vec3 vViewNormal;
+        void main() {
+          vec3 paint = textureCube(cubeMap, normalize(vLocalNormal)).rgb;
+          float rim = 1.0 - smoothstep(0.0, 0.55, abs(normalize(vViewNormal).z));
+          gl_FragColor = vec4(paint * (1.0 - rim * 0.32), 1.0);
+        }
+      `,
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+
+    const faceUrls = cubeFaceNames.map((face) => faces[face]?.url);
+    if (faceUrls.every((url): url is string => Boolean(url))) {
+      new THREE.CubeTextureLoader().load(faceUrls, (texture: THREE.CubeTexture) => {
+        if (disposed) {
+          texture.dispose();
+          return;
+        }
+        texture.colorSpace = THREE.SRGBColorSpace;
+        material.uniforms.cubeMap.value = texture;
+        material.needsUpdate = true;
+      });
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+    const pointer = {
+      active: false,
+      id: 0,
+      anchorPoint: undefined as UnitVector | undefined,
+    };
+    const touches = new Map<number, { x: number; y: number }>();
+    let lastPinchDistance: number | undefined;
+    let frameId = 0;
+
+    const updateView = (next: ViewState) => {
+      viewStateRef.current = next;
+      onViewStateChange(next);
+    };
+
+    const syncViewTransforms = () => {
+      updateOrthographicCamera(camera, host.clientWidth, host.clientHeight, viewStateRef.current.zoom);
+      sphere.quaternion.copy(quaternionStateToThree(viewStateRef.current.orientation));
+      camera.updateMatrixWorld(true);
+      sphere.updateMatrixWorld(true);
+    };
+
+    const rotateToPointerPoint = (anchorPoint: UnitVector, pointerPoint: UnitVector) => {
+      const delta = new THREE.Quaternion().setFromUnitVectors(
+        unitVectorToVector3(anchorPoint),
+        unitVectorToVector3(pointerPoint),
+      );
+      if (isIdentityQuaternion(delta)) return;
+      const orientation = quaternionStateToThree(viewStateRef.current.orientation).multiply(delta).normalize();
+      updateView({ ...viewStateRef.current, orientation: quaternionToState(orientation) });
+    };
+
+    const setZoom = (zoom: number) => {
+      updateView({ ...viewStateRef.current, zoom: clampZoom(zoom) });
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      renderer.domElement.setPointerCapture(event.pointerId);
+      syncViewTransforms();
+      pointer.active = true;
+      pointer.id = event.pointerId;
+      pointer.anchorPoint =
+        touches.size >= 2
+          ? spherePointFromClientPoint(midpoint(touches), renderer, camera, sphere, raycaster, pointerNdc)
+          : spherePointFromPointer(event, renderer, camera, sphere, raycaster, pointerNdc);
+      lastPinchDistance = touches.size >= 2 ? pinchDistance(touches) : undefined;
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (touches.has(event.pointerId)) {
+        touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+      if (touches.size >= 2) {
+        const distance = pinchDistance(touches);
+        if (lastPinchDistance !== undefined) {
+          setZoom(viewStateRef.current.zoom + (distance - lastPinchDistance) / 360);
+        }
+        lastPinchDistance = distance;
+      }
+      if (!pointer.active || (pointer.id !== event.pointerId && touches.size < 2)) return;
+      syncViewTransforms();
+      const rotationPoint =
+        touches.size >= 2
+          ? spherePointFromClientPoint(midpoint(touches), renderer, camera, sphere, raycaster, pointerNdc)
+          : spherePointFromPointer(event, renderer, camera, sphere, raycaster, pointerNdc);
+      if (pointer.anchorPoint && rotationPoint) {
+        rotateToPointerPoint(pointer.anchorPoint, rotationPoint);
+      }
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      touches.delete(event.pointerId);
+      lastPinchDistance = touches.size >= 2 ? pinchDistance(touches) : undefined;
+      if (pointer.id === event.pointerId || touches.size === 0) {
+        pointer.active = false;
+        pointer.anchorPoint = undefined;
+      }
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setZoom(viewStateRef.current.zoom - event.deltaY * 0.0012);
+    };
+
+    const onResize = () => {
+      renderer.setSize(host.clientWidth, host.clientHeight);
+      syncViewTransforms();
+    };
+
+    const animate = () => {
+      syncViewTransforms();
+      renderer.render(scene, camera);
+      frameId = window.requestAnimationFrame(animate);
+    };
+
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointercancel", onPointerUp);
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("resize", onResize);
+    window.visualViewport?.addEventListener("resize", onResize);
+    onResize();
+    animate();
+
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(frameId);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+      renderer.domElement.removeEventListener("wheel", onWheel);
+      window.removeEventListener("resize", onResize);
+      window.visualViewport?.removeEventListener("resize", onResize);
+      host.removeChild(renderer.domElement);
+      const texture = material.uniforms.cubeMap.value as THREE.CubeTexture;
+      if (texture !== fallbackTexture) texture.dispose();
+      fallbackTexture.dispose();
+      geometry.dispose();
+      material.dispose();
+      renderer.dispose();
+    };
+  }, [faces, onViewStateChange]);
+
+  return (
+    <div
+      ref={hostRef}
+      className="absolute inset-0 h-full w-full touch-none cursor-grab active:cursor-grabbing [&_canvas]:block [&_canvas]:h-full [&_canvas]:w-full [&_canvas]:drop-shadow-[0_28px_70px_rgb(255_255_255_/_0.16)]"
+    />
+  );
+}
+
+function readViewModeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("view");
 }
 
 function readScreensaverModeFromUrl() {

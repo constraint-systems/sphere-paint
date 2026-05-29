@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import type { WebSocket } from "@fastify/websocket";
 import { clientMessageSchema, type ServerEvent } from "@globe2/shared";
 import Fastify from "fastify";
 import type { AppConfig } from "./config";
@@ -12,7 +13,15 @@ export function createApp(config: AppConfig) {
   const app = Fastify({ logger: true });
   const { db, pool } = createDb(config.DATABASE_URL);
   const worldService = new WorldService(db, config);
-  const sockets = new Set<{ visitId: string; connectionId: string; send: (event: ServerEvent) => void }>();
+  type PresenceConnection = {
+    visitId: string;
+    connectionId: string;
+    socket: WebSocket;
+    isAlive: boolean;
+    send: (event: ServerEvent) => void;
+  };
+  const sockets = new Set<PresenceConnection>();
+  const heartbeatIntervalMs = 60_000;
 
   function presenceCount() {
     return sockets.size;
@@ -34,6 +43,21 @@ export function createApp(config: AppConfig) {
 
   function broadcastPresence() {
     broadcast({ type: "presence_changed", presenceCount: presenceCount() });
+  }
+
+  function removeConnection(connection: PresenceConnection) {
+    if (!sockets.delete(connection)) {
+      return;
+    }
+
+    broadcastPresence();
+
+    broadcastExcept({
+      type: "stroke_cancelled",
+      visitId: connection.visitId,
+      connectionId: connection.connectionId,
+      strokeId: "*"
+    }, connection.connectionId);
   }
 
   app.register(cors, {
@@ -68,22 +92,47 @@ export function createApp(config: AppConfig) {
   });
 
   app.addHook("onClose", async () => {
+    clearInterval(heartbeatInterval);
     await pool.end();
   });
+
+  const heartbeatInterval = setInterval(() => {
+    for (const connection of sockets) {
+      if (!connection.isAlive) {
+        removeConnection(connection);
+        connection.socket.terminate();
+        continue;
+      }
+
+      connection.isAlive = false;
+      try {
+        connection.socket.ping();
+      } catch {
+        removeConnection(connection);
+        connection.socket.terminate();
+      }
+    }
+  }, heartbeatIntervalMs);
+  heartbeatInterval.unref();
 
   app.get<{ Headers: { "x-visit-id"?: string } }>("/api/bootstrap", async (request) =>
     worldService.bootstrap(request.headers["x-visit-id"], presenceCount())
   );
 
+  app.get("/api/snapshots", async () => ({
+    snapshots: await worldService.listPromotedSnapshots()
+  }));
+
   app.after(() => {
     app.get("/api/ws", { websocket: true }, (socket) => {
-      let connection:
-        | {
-            visitId: string;
-            connectionId: string;
-            send: (event: ServerEvent) => void;
-          }
-        | undefined;
+      let connection: PresenceConnection | undefined;
+      let subscribing = false;
+
+      socket.on("pong", () => {
+        if (connection) {
+          connection.isAlive = true;
+        }
+      });
 
       socket.on("message", (message: Buffer) => {
         app.log.debug({ message: message.toString() }, "websocket message received");
@@ -174,6 +223,18 @@ export function createApp(config: AppConfig) {
           return;
         }
 
+        if (connection || subscribing) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              code: "validation_failed",
+              message: "WebSocket is already subscribed"
+            } satisfies ServerEvent)
+          );
+          return;
+        }
+
+        subscribing = true;
         void (async () => {
           const bootstrap = await worldService.bootstrap(clientMessage.visitId, presenceCount());
           const connectionId = crypto.randomUUID();
@@ -181,6 +242,8 @@ export function createApp(config: AppConfig) {
           connection = {
             visitId: bootstrap.visitId,
             connectionId,
+            socket,
+            isAlive: true,
             send: (event) => socket.send(JSON.stringify(event))
           };
           sockets.add(connection);
@@ -207,6 +270,8 @@ export function createApp(config: AppConfig) {
         })().catch((error: unknown) => {
           app.log.error(error);
           socket.send(JSON.stringify({ type: "error", code: "server_error" } satisfies ServerEvent));
+        }).finally(() => {
+          subscribing = false;
         });
       });
 
@@ -215,15 +280,7 @@ export function createApp(config: AppConfig) {
           return;
         }
 
-        sockets.delete(connection);
-        broadcastPresence();
-
-        broadcastExcept({
-          type: "stroke_cancelled",
-          visitId: connection.visitId,
-          connectionId: connection.connectionId,
-          strokeId: "*"
-        }, connection.connectionId);
+        removeConnection(connection);
       });
     });
   });
