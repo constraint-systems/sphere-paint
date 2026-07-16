@@ -123,6 +123,13 @@ export function createApp(config: AppConfig) {
     snapshots: await worldService.listPromotedSnapshots()
   }));
 
+  app.get<{ Querystring: { offset?: string; limit?: string } }>("/api/replay-drawings", async (request) =>
+    worldService.listReplayDrawingsPage(
+      Number(request.query.offset ?? 0),
+      Number(request.query.limit ?? 500)
+    )
+  );
+
   app.after(() => {
     app.get("/api/ws", { websocket: true }, (socket) => {
       let connection: PresenceConnection | undefined;
