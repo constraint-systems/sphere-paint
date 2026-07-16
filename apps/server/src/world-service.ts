@@ -56,6 +56,13 @@ export type TimelapseSnapshot = {
   promotedAt: string | null;
 };
 
+export type ReplayDrawingsPage = {
+  drawings: Drawing[];
+  offset: number;
+  limit: number;
+  totalCount: number;
+};
+
 const defaultWorldId = "00000000-0000-4000-8000-000000000001";
 const initialSnapshotId = "00000000-0000-4000-8000-000000000101";
 
@@ -199,6 +206,45 @@ export class WorldService {
       promotedRevision: snapshot.promotedRevision ?? 0,
       promotedAt: snapshot.promotedAt?.toISOString() ?? null
     }));
+  }
+
+  async listReplayDrawingsPage(offset: number, limit: number): Promise<ReplayDrawingsPage> {
+    const worldId = await this.ensureDefaultWorld();
+    const normalizedOffset = Number.isFinite(offset)
+      ? Math.max(0, Math.trunc(offset))
+      : 0;
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.min(1000, Math.max(1, Math.trunc(limit)))
+      : 500;
+    const [{ totalCount }] = await this.db
+      .select({ totalCount: count(drawings.id) })
+      .from(drawings)
+      .where(eq(drawings.worldId, worldId));
+    const rows = await this.db
+      .select()
+      .from(drawings)
+      .where(eq(drawings.worldId, worldId))
+      .orderBy(asc(drawings.createdRevision), asc(drawings.createdAt))
+      .limit(normalizedLimit)
+      .offset(normalizedOffset);
+
+    return {
+      drawings: rows.map((drawing) =>
+        drawingSchema.parse({
+          id: drawing.id,
+          worldId: drawing.worldId,
+          visitId: drawing.visitId,
+          path: drawing.path,
+          color: normalizeDrawingColor(drawing.color),
+          brushSize: drawing.brushSize,
+          createdRevision: drawing.createdRevision,
+          createdAt: drawing.createdAt.toISOString()
+        })
+      ),
+      offset: normalizedOffset,
+      limit: normalizedLimit,
+      totalCount
+    };
   }
 
   async ensureVisit(worldId: string, visitId: string | undefined) {

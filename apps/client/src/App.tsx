@@ -18,17 +18,17 @@ import {
   type UnitVector,
 } from "@globe2/shared";
 import {
-  ChevronLeftIcon,
-  ChevronRightIcon,
   CircleIcon,
   KeyIcon,
   LockIcon,
   MinusIcon,
+  PauseIcon,
   PlayIcon,
   PlusIcon,
+  VideoIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
 type BootstrapState =
@@ -66,6 +66,13 @@ const viewStorageDelay = 250;
 const overlayFaceSize = 1024;
 const farZoomOrthographicSize = 3.8;
 const closeZoomOrthographicSize = 1.25;
+const replayDrawingIntervalMs = 32;
+const replayRestartPauseMs = 1600;
+const replayFollowSmoothing = 0.12;
+const replaySeekCheckpointInterval = 250;
+const replayPageSize = 500;
+const replayPreloadAheadCount = 1000;
+const replayKeyboardSeekStep = 100;
 
 type QuaternionState = {
   x: number;
@@ -77,6 +84,18 @@ type QuaternionState = {
 type ViewState = {
   zoom: number;
   orientation: QuaternionState;
+};
+
+type ReplaySeekRequest = {
+  index: number;
+  nonce: number;
+};
+
+type ReplayDrawingsPage = {
+  drawings: Drawing[];
+  offset: number;
+  limit: number;
+  totalCount: number;
 };
 
 export function App() {
@@ -1389,14 +1408,6 @@ function PaintApp() {
     });
   };
 
-  const enterScreensaverMode = () => {
-    const params = new URLSearchParams(window.location.search);
-    params.set("screensaver", "1");
-    const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
-    window.history.replaceState(null, "", nextUrl);
-    setScreensaverMode(true);
-  };
-
   const exitScreensaverMode = () => {
     const params = new URLSearchParams(window.location.search);
     params.delete("screensaver");
@@ -1728,14 +1739,12 @@ A <a className="underline text-neutral-200" href="https://constraint.systems/" t
                 </span>
               </button>
 
-              <button
-                type="button"
-                className={`${buttonClass} w-12 h-12 grid place-items-center`}
-                aria-label="Enter screensaver mode"
-                onClick={enterScreensaverMode}
+              <a
+                className={`${buttonClass} h-12 inline-flex items-center px-4 no-underline text-neutral-950`}
+                href="?view=timelapse"
               >
-                <PlayIcon fill="currentColor" className={iconClass} aria-hidden="true" />
-              </button>
+                Replay
+              </a>
             </div>
           )}
 
@@ -1745,146 +1754,276 @@ A <a className="underline text-neutral-200" href="https://constraint.systems/" t
   );
 }
 
-type TimelapseSnapshot = {
-  id: string;
-  faces: SnapshotFaces;
-  sourceFromRevision: number;
-  sourceToRevision: number;
-  promotedRevision: number;
-  promotedAt: string | null;
-};
-
 type TimelapseState =
   | { status: "loading" }
-  | { status: "ready"; snapshots: TimelapseSnapshot[] }
+  | { status: "ready"; totalCount: number }
   | { status: "error"; message: string };
 
 function TimelapseApp() {
   const [state, setState] = useState<TimelapseState>({ status: "loading" });
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [replayDate, setReplayDate] = useState<string | undefined>(undefined);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [cameraFollowEnabled, setCameraFollowEnabled] = useState(true);
+  const [seekBuffering, setSeekBuffering] = useState(false);
+  const [seekRequest, setSeekRequest] = useState<ReplaySeekRequest>({
+    index: 0,
+    nonce: 0,
+  });
   const [viewState, setViewState] = useState<ViewState>(() => ({
     zoom: viewSettings.initialZoom,
     orientation: identityQuaternionState(),
   }));
-  const currentSnapshot =
-    state.status === "ready" ? state.snapshots[currentIndex] : undefined;
-  const snapshotCount = state.status === "ready" ? state.snapshots.length : 0;
+  const replayDrawingsRef = useRef(new Map<number, Drawing>());
+  const loadingReplayPagesRef = useRef(new Set<number>());
+  const loadedReplayPagesRef = useRef(new Set<number>());
+  const resumeAfterSeekRef = useRef(true);
+  const drawingCount = state.status === "ready" ? state.totalCount : 0;
+
+  const updateReplayPosition = useCallback(
+    (index: number) => {
+      setReplayIndex(index);
+      const currentDrawingIndex =
+        drawingCount > 0 ? Math.min(Math.max(0, index - 1), drawingCount - 1) : 0;
+      setReplayDate(replayDrawingsRef.current.get(currentDrawingIndex)?.createdAt);
+    },
+    [drawingCount],
+  );
+
+  const loadReplayPage = useCallback(
+    async (pageIndex: number, signal?: AbortSignal) => {
+      if (
+        pageIndex < 0 ||
+        loadingReplayPagesRef.current.has(pageIndex) ||
+        loadedReplayPagesRef.current.has(pageIndex)
+      ) {
+        return;
+      }
+
+      loadingReplayPagesRef.current.add(pageIndex);
+
+      try {
+        const offset = pageIndex * replayPageSize;
+        const params = new URLSearchParams({
+          offset: String(offset),
+          limit: String(replayPageSize),
+        });
+        const response = await fetch(`/api/replay-drawings?${params}`, {
+          signal,
+        });
+
+        if (!response.ok) {
+          throw new Error("Could not load replay drawings");
+        }
+
+        const payload = (await response.json()) as ReplayDrawingsPage;
+        const orderedDrawings = orderDrawingsForPaint(payload.drawings);
+
+        for (let index = 0; index < orderedDrawings.length; index += 1) {
+          replayDrawingsRef.current.set(payload.offset + index, orderedDrawings[index]);
+        }
+
+        loadedReplayPagesRef.current.add(pageIndex);
+        setState({ status: "ready", totalCount: payload.totalCount });
+      } finally {
+        loadingReplayPagesRef.current.delete(pageIndex);
+      }
+    },
+    [],
+  );
+
+  const requestReplayBuffer = useCallback(
+    (index: number, includeHistory = false) => {
+      const firstPage = includeHistory
+        ? 0
+        : Math.floor(Math.max(0, index) / replayPageSize);
+      const lastPage = Math.floor(
+        Math.max(0, index + replayPreloadAheadCount) / replayPageSize,
+      );
+
+      for (let pageIndex = firstPage; pageIndex <= lastPage; pageIndex += 1) {
+        void loadReplayPage(pageIndex);
+      }
+    },
+    [loadReplayPage],
+  );
+
+  const seekToReplayIndex = useCallback((index: number) => {
+    if (!seekBuffering) {
+      resumeAfterSeekRef.current = isPlaying;
+    }
+    setSeekBuffering(true);
+    setIsPlaying(false);
+    updateReplayPosition(index);
+    setSeekRequest((current) => ({
+      index,
+      nonce: current.nonce + 1,
+    }));
+  }, [isPlaying, seekBuffering, updateReplayPosition]);
+
+  const finishSeekBuffering = useCallback(() => {
+    setSeekBuffering(false);
+    if (resumeAfterSeekRef.current) {
+      setIsPlaying(true);
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/snapshots")
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Could not load snapshots");
-        return response.json() as Promise<{ snapshots: TimelapseSnapshot[] }>;
-      })
-      .then((payload) => {
-        if (cancelled) return;
-        setState({ status: "ready", snapshots: payload.snapshots });
-        setCurrentIndex(0);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement && event.target.type !== "range") {
+        return;
+      }
+
+      if (event.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (event.key === " ") {
+        event.preventDefault();
+        if (!seekBuffering) {
+          setIsPlaying((playing) => !playing);
+        }
+        return;
+      }
+
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        seekToReplayIndex(
+          Math.min(
+            drawingCount,
+            Math.max(0, replayIndex + direction * replayKeyboardSeekStep),
+          ),
+        );
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [drawingCount, replayIndex, seekBuffering, seekToReplayIndex]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadReplayPage(0, controller.signal)
+      .then(() => {
+        updateReplayPosition(0);
+        requestReplayBuffer(0);
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setState({
           status: "error",
-          message: error instanceof Error ? error.message : "Could not load snapshots",
+          message: error instanceof Error ? error.message : "Could not load replay drawings",
         });
       });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-  }, []);
-
-  const moveSnapshot = (direction: -1 | 1) => {
-    if (snapshotCount === 0) return;
-    setCurrentIndex((index) =>
-      Math.min(snapshotCount - 1, Math.max(0, index + direction)),
-    );
-  };
+  }, [loadReplayPage, requestReplayBuffer, updateReplayPosition]);
 
   const statusOverlay =
     state.status === "loading"
       ? { tone: "loading" as const, message: "Loading" }
       : state.status === "error"
         ? { tone: "error" as const, message: state.message }
-        : snapshotCount === 0
-          ? { tone: "error" as const, message: "No snapshots yet" }
+        : drawingCount === 0
+          ? { tone: "error" as const, message: "No drawings yet" }
           : undefined;
 
   return (
     <main className="relative h-dvh min-h-dvh w-screen overflow-hidden bg-neutral-900 text-neutral-950">
       <section
         className="fixed inset-0 grid h-dvh min-h-dvh min-w-0 place-items-center bg-neutral-900"
-        aria-label="Snapshot timelapse sphere"
+        aria-label="Drawing replay sphere"
       >
-        {currentSnapshot ? (
+        {state.status === "ready" && drawingCount > 0 ? (
           <TimelapseSphere
-            faces={currentSnapshot.faces}
+            drawingCount={drawingCount}
+            getDrawing={(index) => replayDrawingsRef.current.get(index)}
+            requestReplayBuffer={requestReplayBuffer}
+            isPlaying={isPlaying}
+            cameraFollowEnabled={cameraFollowEnabled}
+            seekRequest={seekRequest}
             viewState={viewState}
             onViewStateChange={setViewState}
+            onReplayIndexChange={updateReplayPosition}
+            onSeekSettled={finishSeekBuffering}
           />
         ) : null}
       </section>
 
-      {statusOverlay ? (
+      {statusOverlay || seekBuffering ? (
         <div className="pointer-events-none fixed inset-0 z-8 grid place-items-center px-6" aria-live="polite">
           <div
             className={`max-w-sm bg-neutral-400 px-6 py-4 text-center shadow-2xl ${
-              statusOverlay.tone === "loading" ? "animate-pulse" : "text-red-800"
+              statusOverlay?.tone === "error" ? "text-red-800" : "animate-pulse"
             }`}
-            role={statusOverlay.tone === "error" ? "alert" : "status"}
+            role={statusOverlay?.tone === "error" ? "alert" : "status"}
           >
-            {statusOverlay.message}
+            {statusOverlay?.message ?? "Loading"}
           </div>
         </div>
       ) : null}
 
       <header className="pointer-events-none fixed inset-x-0 top-0 z-5 flex">
         <a className="pointer-events-auto grid h-12 place-items-center bg-neutral-400 px-4 text-neutral-950" href="/">
-          Sphere Paint
+          Replay
         </a>
         <div className="grow" />
-        <div className="pointer-events-auto grid h-12 place-items-center bg-neutral-400 px-4 text-neutral-950">
-          Timelapse
-        </div>
+        <a
+          className="pointer-events-auto grid h-12 w-12 place-items-center bg-neutral-400 text-neutral-950"
+          href="/"
+          aria-label="Exit replay"
+        >
+          <XIcon className="size-4" aria-hidden="true" />
+        </a>
       </header>
 
-      {state.status === "ready" && snapshotCount > 0 ? (
+      {state.status === "ready" && drawingCount > 0 ? (
         <aside className="pointer-events-none fixed inset-x-0 bottom-0 z-5 flex items-end justify-center" aria-label="Timelapse controls">
-          <div className="pointer-events-auto flex min-h-12 w-full max-w-3xl bg-neutral-400 text-neutral-950">
+          <div className="pointer-events-auto flex min-h-12 w-full bg-neutral-400 text-neutral-950">
             <button
               type="button"
-              className="grid h-12 w-12 shrink-0 cursor-pointer place-items-center disabled:cursor-default disabled:opacity-45"
-              aria-label="Previous snapshot"
-              disabled={currentIndex === 0}
-              onClick={() => moveSnapshot(-1)}
+              className="grid h-12 w-12 shrink-0 cursor-pointer place-items-center"
+              aria-label={isPlaying ? "Pause timelapse" : "Play timelapse"}
+              onClick={() => setIsPlaying((playing) => !playing)}
             >
-              <ChevronLeftIcon className="size-4" aria-hidden="true" />
+              {isPlaying ? (
+                <PauseIcon fill="currentColor" className="size-4" aria-hidden="true" />
+              ) : (
+                <PlayIcon fill="currentColor" className="size-4" aria-hidden="true" />
+              )}
             </button>
             <label className="grid h-12 min-w-0 grow content-center px-3">
-              <span className="sr-only">Snapshot</span>
+              <span className="sr-only">Replay position</span>
               <input
                 className="h-8 w-full cursor-pointer accent-neutral-950"
                 type="range"
                 min={0}
-                max={Math.max(0, snapshotCount - 1)}
+                max={drawingCount}
                 step={1}
-                value={currentIndex}
-                onChange={(event) => setCurrentIndex(Number(event.target.value))}
+                value={replayIndex}
+                onChange={(event) => {
+                  seekToReplayIndex(Number(event.target.value));
+                }}
               />
             </label>
+            <div className="grid h-12 min-w-36 shrink-0 place-items-center px-4 tabular-nums">
+              {formatReplayDate(replayDate)}
+            </div>
             <button
               type="button"
-              className="grid h-12 w-12 shrink-0 cursor-pointer place-items-center disabled:cursor-default disabled:opacity-45"
-              aria-label="Next snapshot"
-              disabled={currentIndex >= snapshotCount - 1}
-              onClick={() => moveSnapshot(1)}
+              className={`grid h-12 w-12 shrink-0 cursor-pointer place-items-center ${
+                cameraFollowEnabled ? "bg-neutral-500 text-neutral-950" : ""
+              }`}
+              aria-label={cameraFollowEnabled ? "Turn camera follow off" : "Turn camera follow on"}
+              aria-pressed={cameraFollowEnabled}
+              onClick={() => setCameraFollowEnabled((enabled) => !enabled)}
             >
-              <ChevronRightIcon className="size-4" aria-hidden="true" />
+              <VideoIcon fill="currentColor" className="size-4" aria-hidden="true" />
             </button>
-            <div className="grid h-12 min-w-28 shrink-0 place-items-center px-4 tabular-nums">
-              {currentIndex + 1}/{snapshotCount}
-            </div>
           </div>
         </aside>
       ) : null}
@@ -1893,26 +2032,63 @@ function TimelapseApp() {
 }
 
 function TimelapseSphere({
-  faces,
+  drawingCount,
+  getDrawing,
+  requestReplayBuffer,
+  isPlaying,
+  cameraFollowEnabled,
+  seekRequest,
   viewState,
   onViewStateChange,
+  onReplayIndexChange,
+  onSeekSettled,
 }: {
-  faces: SnapshotFaces;
+  drawingCount: number;
+  getDrawing: (index: number) => Drawing | undefined;
+  requestReplayBuffer: (index: number, includeHistory?: boolean) => void;
+  isPlaying: boolean;
+  cameraFollowEnabled: boolean;
+  seekRequest: ReplaySeekRequest;
   viewState: ViewState;
   onViewStateChange: (viewState: ViewState) => void;
+  onReplayIndexChange: (index: number) => void;
+  onSeekSettled: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewStateRef = useRef(viewState);
+  const isPlayingRef = useRef(isPlaying);
+  const cameraFollowEnabledRef = useRef(cameraFollowEnabled);
+  const seekRequestRef = useRef(seekRequest);
+  const getDrawingRef = useRef(getDrawing);
+  const requestReplayBufferRef = useRef(requestReplayBuffer);
+  const onSeekSettledRef = useRef(onSeekSettled);
 
   useEffect(() => {
     viewStateRef.current = viewState;
   }, [viewState]);
 
   useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    cameraFollowEnabledRef.current = cameraFollowEnabled;
+  }, [cameraFollowEnabled]);
+
+  useEffect(() => {
+    seekRequestRef.current = seekRequest;
+  }, [seekRequest]);
+
+  useEffect(() => {
+    getDrawingRef.current = getDrawing;
+    requestReplayBufferRef.current = requestReplayBuffer;
+    onSeekSettledRef.current = onSeekSettled;
+  }, [getDrawing, onSeekSettled, requestReplayBuffer]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
-    let disposed = false;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(host.clientWidth, host.clientHeight);
@@ -1924,8 +2100,12 @@ function TimelapseSphere({
     camera.lookAt(0, 0, 0);
     const geometry = new THREE.SphereGeometry(1, 96, 64);
     const fallbackTexture = createFallbackCubeTexture();
+    const overlay = createOverlayCubeTexture();
     const material = new THREE.ShaderMaterial({
-      uniforms: { cubeMap: { value: fallbackTexture } },
+      uniforms: {
+        cubeMap: { value: fallbackTexture },
+        overlayMap: { value: overlay.texture },
+      },
       vertexShader: `
         varying vec3 vLocalNormal;
         varying vec3 vViewNormal;
@@ -1937,30 +2117,21 @@ function TimelapseSphere({
       `,
       fragmentShader: `
         uniform samplerCube cubeMap;
+        uniform samplerCube overlayMap;
         varying vec3 vLocalNormal;
         varying vec3 vViewNormal;
         void main() {
-          vec3 paint = textureCube(cubeMap, normalize(vLocalNormal)).rgb;
+          vec3 localNormal = normalize(vLocalNormal);
+          vec3 paint = textureCube(cubeMap, localNormal).rgb;
+          vec4 overlay = textureCube(overlayMap, localNormal);
+          vec3 spherePaint = mix(paint, overlay.rgb, overlay.a);
           float rim = 1.0 - smoothstep(0.0, 0.55, abs(normalize(vViewNormal).z));
-          gl_FragColor = vec4(paint * (1.0 - rim * 0.32), 1.0);
+          gl_FragColor = vec4(spherePaint * (1.0 - rim * 0.32), 1.0);
         }
       `,
     });
     const sphere = new THREE.Mesh(geometry, material);
     scene.add(sphere);
-
-    const faceUrls = cubeFaceNames.map((face) => faces[face]?.url);
-    if (faceUrls.every((url): url is string => Boolean(url))) {
-      new THREE.CubeTextureLoader().load(faceUrls, (texture: THREE.CubeTexture) => {
-        if (disposed) {
-          texture.dispose();
-          return;
-        }
-        texture.colorSpace = THREE.SRGBColorSpace;
-        material.uniforms.cubeMap.value = texture;
-        material.needsUpdate = true;
-      });
-    }
 
     const raycaster = new THREE.Raycaster();
     const pointerNdc = new THREE.Vector2();
@@ -1972,6 +2143,14 @@ function TimelapseSphere({
     const touches = new Map<number, { x: number; y: number }>();
     let lastPinchDistance: number | undefined;
     let frameId = 0;
+    let replayDrawingIndex = 0;
+    let replayElapsedMs = 0;
+    let followPoint: UnitVector | undefined;
+    let previousFrameAt = performance.now();
+    let handledSeekNonce = seekRequestRef.current.nonce;
+    let pendingSeekIndex: number | undefined;
+    let settlingSeekIndex: number | undefined;
+    const seekCheckpoints = new Map<number, HTMLCanvasElement[]>();
 
     const updateView = (next: ViewState) => {
       viewStateRef.current = next;
@@ -2053,7 +2232,168 @@ function TimelapseSphere({
       syncViewTransforms();
     };
 
+    const resetReplay = () => {
+      replayDrawingIndex = 0;
+      replayElapsedMs = 0;
+      followPoint = undefined;
+      pendingSeekIndex = undefined;
+      settlingSeekIndex = undefined;
+      repaintOverlay(overlay, []);
+      onReplayIndexChange(0);
+    };
+
+    const snapshotOverlayCanvases = () =>
+      cubeFaceNames.map((faceName) => {
+        const source = overlay.contexts[faceName].canvas;
+        const canvas = document.createElement("canvas");
+        canvas.width = source.width;
+        canvas.height = source.height;
+        canvas.getContext("2d")?.drawImage(source, 0, 0);
+        return canvas;
+      });
+
+    const restoreOverlayCanvases = (canvases: HTMLCanvasElement[]) => {
+      cubeFaceNames.forEach((faceName, index) => {
+        const context = overlay.contexts[faceName];
+        context.clearRect(0, 0, overlayFaceSize, overlayFaceSize);
+        context.drawImage(canvases[index], 0, 0);
+      });
+      overlay.texture.needsUpdate = true;
+    };
+
+    const seekReplay = (nextIndex: number) => {
+      const clampedIndex = Math.min(drawingCount, Math.max(0, nextIndex));
+      const checkpointIndex =
+        Math.floor(clampedIndex / replaySeekCheckpointInterval) *
+        replaySeekCheckpointInterval;
+      const checkpoint = seekCheckpoints.get(checkpointIndex);
+      let missingBufferedDrawing = false;
+
+      if (checkpoint) {
+        restoreOverlayCanvases(checkpoint);
+        for (let index = checkpointIndex; index < clampedIndex; index += 1) {
+          const drawing = getDrawingRef.current(index);
+          if (!drawing) {
+            missingBufferedDrawing = true;
+            break;
+          }
+          paintDrawingOnOverlay(overlay, drawing);
+        }
+        overlay.texture.needsUpdate = true;
+      } else {
+        const replayedDrawings: Drawing[] = [];
+        for (let index = 0; index < clampedIndex; index += 1) {
+          const drawing = getDrawingRef.current(index);
+          if (!drawing) {
+            missingBufferedDrawing = true;
+            break;
+          }
+          replayedDrawings.push(drawing);
+        }
+        repaintOverlay(overlay, replayedDrawings);
+      }
+
+      if (missingBufferedDrawing) {
+        pendingSeekIndex = clampedIndex;
+        requestReplayBufferRef.current(clampedIndex, true);
+        return;
+      }
+
+      replayDrawingIndex = clampedIndex;
+      replayElapsedMs = 0;
+      const followDrawing = getDrawingRef.current(clampedIndex);
+      followPoint = followDrawing
+        ? averagePathWindow(
+            followDrawing.path,
+            0,
+            followDrawing.path.length,
+          )
+        : undefined;
+      onReplayIndexChange(clampedIndex);
+      pendingSeekIndex = undefined;
+      requestReplayBufferRef.current(clampedIndex);
+      if (settlingSeekIndex === clampedIndex) {
+        settlingSeekIndex = undefined;
+        onSeekSettledRef.current();
+      }
+    };
+
+    const paintNextReplayDrawing = () => {
+      const drawing = getDrawingRef.current(replayDrawingIndex);
+
+      if (!drawing) {
+        requestReplayBufferRef.current(replayDrawingIndex);
+        return;
+      }
+
+      paintDrawingOnOverlay(overlay, drawing);
+      overlay.texture.needsUpdate = true;
+      followPoint = averagePathWindow(drawing.path, 0, drawing.path.length);
+      replayDrawingIndex += 1;
+
+      if (
+        replayDrawingIndex % replaySeekCheckpointInterval === 0 &&
+        !seekCheckpoints.has(replayDrawingIndex)
+      ) {
+        seekCheckpoints.set(replayDrawingIndex, snapshotOverlayCanvases());
+      }
+      requestReplayBufferRef.current(replayDrawingIndex);
+      onReplayIndexChange(replayDrawingIndex);
+    };
+
     const animate = () => {
+      const now = performance.now();
+      const frameMs = now - previousFrameAt;
+      previousFrameAt = now;
+
+      const pendingSeekRequest = seekRequestRef.current;
+      if (pendingSeekRequest.nonce !== handledSeekNonce) {
+        handledSeekNonce = pendingSeekRequest.nonce;
+        settlingSeekIndex = Math.min(drawingCount, Math.max(0, pendingSeekRequest.index));
+        seekReplay(pendingSeekRequest.index);
+      }
+      if (pendingSeekIndex !== undefined) {
+        seekReplay(pendingSeekIndex);
+      }
+
+      if (
+        isPlayingRef.current &&
+        cameraFollowEnabledRef.current &&
+        !pointer.active
+      ) {
+        const orientation = quaternionStateToThree(viewStateRef.current.orientation);
+
+        if (followPoint) {
+          const targetOrientation = new THREE.Quaternion().setFromUnitVectors(
+            unitVectorToVector3(followPoint),
+            new THREE.Vector3(0, 0, 1),
+          );
+          orientation.slerp(targetOrientation, replayFollowSmoothing).normalize();
+        }
+
+        updateView({
+          ...viewStateRef.current,
+          orientation: quaternionToState(orientation),
+        });
+      }
+
+      if (isPlayingRef.current) {
+        replayElapsedMs += frameMs;
+        if (replayDrawingIndex >= drawingCount) {
+          if (replayElapsedMs >= replayRestartPauseMs) {
+            resetReplay();
+          }
+        } else {
+          while (
+            replayDrawingIndex < drawingCount &&
+            replayElapsedMs >= replayDrawingIntervalMs
+          ) {
+            paintNextReplayDrawing();
+            replayElapsedMs -= replayDrawingIntervalMs;
+          }
+        }
+      }
+
       syncViewTransforms();
       renderer.render(scene, camera);
       frameId = window.requestAnimationFrame(animate);
@@ -2070,7 +2410,6 @@ function TimelapseSphere({
     animate();
 
     return () => {
-      disposed = true;
       window.cancelAnimationFrame(frameId);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
@@ -2082,12 +2421,13 @@ function TimelapseSphere({
       host.removeChild(renderer.domElement);
       const texture = material.uniforms.cubeMap.value as THREE.CubeTexture;
       if (texture !== fallbackTexture) texture.dispose();
+      overlay.texture.dispose();
       fallbackTexture.dispose();
       geometry.dispose();
       material.dispose();
       renderer.dispose();
     };
-  }, [faces, onViewStateChange]);
+  }, [drawingCount, onReplayIndexChange, onViewStateChange]);
 
   return (
     <div
@@ -2107,6 +2447,20 @@ function readScreensaverModeFromUrl() {
   return (
     params.get("screensaver") === "1" || params.get("mode") === "screensaver"
   );
+}
+
+function formatReplayDate(value: string | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return date.toISOString().slice(0, 10);
 }
 
 function readStoredViewState(): ViewState {
@@ -2253,6 +2607,38 @@ function autoRotateStep(frameMs: number) {
 
 function unitVectorToVector3(point: UnitVector) {
   return new THREE.Vector3(point.x, point.y, point.z).normalize();
+}
+
+function averagePathWindow(
+  path: UnitVector[],
+  startIndex: number,
+  pointCount: number,
+): UnitVector | undefined {
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  let count = 0;
+  const endIndex = Math.min(path.length, startIndex + pointCount);
+
+  for (let index = startIndex; index < endIndex; index += 1) {
+    const point = path[index];
+    x += point.x;
+    y += point.y;
+    z += point.z;
+    count += 1;
+  }
+
+  const length = Math.hypot(x, y, z);
+
+  if (count === 0 || length < 0.000001) {
+    return path[startIndex];
+  }
+
+  return {
+    x: x / length,
+    y: y / length,
+    z: z / length,
+  };
 }
 
 function isIdentityQuaternion(quaternion: THREE.Quaternion) {
